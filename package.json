@@ -1,0 +1,29 @@
+{
+  "name": "booran-sales-floor-backend",
+  "version": "1.0.0",
+  "description": "Booran Motors Sales Floor Backend API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/macworldgithub/booran-sales-floor-backend.git"
+  },
+  "keywords": [
+    "booran",
+    "sales-floor",
+    "crm",
+    "inventory"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.7",
+    "express": "^4.21.2",
+    "mongodb": "^7.7.0"
+  }
+}
