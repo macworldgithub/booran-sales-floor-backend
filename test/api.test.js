@@ -80,7 +80,17 @@ async function api(t) {
     ],
     actionitems: [{ _id: new ObjectId(), rooftopName: 'South Morang Kia', status: 'open' }],
   };
-  const app = createApp({ database: async () => fixtureDb(records) });
+  const hooks = {};
+  const app = createApp({ database: async (key) => {
+    const db = fixtureDb(records);
+    return { command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
+      const collection = db.collection(name);
+      return { ...collection, async findOne(query) {
+        if (hooks.beforeFindOne) await hooks.beforeFindOne(name, query);
+        return collection.findOne(query);
+      } };
+    } };
+  } });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
@@ -88,7 +98,7 @@ async function api(t) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api${path}`, { ...options, headers: { cookie: `booran_session=${token}`, 'content-type': 'application/json', ...options.headers } });
     return { status: response.status, body: await response.json(), headers: response.headers };
   }
-  return { request, records, user, token };
+  return { request, records, user, token, hooks };
 }
 test('HTTP login, session expiry and logout enforce authentication', async (t) => {
   const { request, records } = await api(t);
@@ -218,5 +228,55 @@ test('HTTP malformed stored sessions are rejected as expired rather than causing
   records.sessions[0].userId = 'broken-id';
   const result = await request('/auth/me');
   assert.equal(result.status, 401);
-  assert.match(result.headers.get('set-cookie'), /Expires=/);
+  assert.equal(result.headers.get('set-cookie'), null);
+});
+
+test('HTTP late expired-session responses cannot erase a newer login cookie', async (t) => {
+  const { request, records, hooks } = await api(t);
+  records.sessions[0].expiresAt = new Date(0);
+  let release, started;
+  const reached = new Promise((resolve) => { started = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  hooks.beforeFindOne = async (name) => { if (name === 'sessions') { started(); await blocked; } };
+  const previous = request('/auth/me');
+  await reached;
+  const login = await request('/auth/login', { method: 'POST', body: JSON.stringify({ email: 'southmorang@booran.com', password: '123456' }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  release();
+  const expired = await previous;
+  assert.equal(expired.status, 401);
+  assert.equal(expired.headers.get('set-cookie'), null);
+  assert.equal((await request('/auth/me', { headers: { cookie } })).status, 200);
+  const logout = await request('/auth/logout', { method: 'POST', headers: { cookie } });
+  assert.match(logout.headers.get('set-cookie'), /Expires=/);
+});
+
+test('HTTP parser errors retain client status codes and no-store response headers', async (t) => {
+  const { request } = await api(t);
+  for (const [path, options, status] of [
+    ['/leads/%E0%A4%A', {}, 400],
+    ['/leads', { method: 'POST', headers: { 'content-type': 'application/json; charset=invalid' }, body: '{}' }, 415],
+    ['/leads', { method: 'POST', body: '{' }, 400],
+  ]) {
+    const result = await request(path, options);
+    assert.equal(result.status, status);
+    assert.equal(result.headers.get('cache-control'), 'private, no-store');
+    assert.equal(result.body.success, false);
+  }
+});
+
+test('HTTP health reports each database accurately when only one is available', async (t) => {
+  const { request, hooks } = await api(t);
+  hooks.ping = async (key) => { if (key === 'MONGODB_URI_FLWUP') throw new Error('Database unavailable'); return { ok: 1 }; };
+  const result = await request('/health', { headers: { cookie: '' } });
+  assert.equal(result.status, 503);
+  assert.deepEqual(result.body.databases, { flwup_crm: 'error', booran_inventory_tracker: 'connected' });
+});
+
+test('Mongo date values in lead diary entries are preserved in API responses', () => {
+  const { serializeLead } = require('../lib/records');
+  const date = new Date('2026-10-20T01:30:00Z');
+  const result = serializeLead({ _id: new ObjectId(), diary_entries: [{ author: 'Manager', note: 'Called', date }] });
+  assert.equal(result.diary_entries[0].date, date.toISOString());
 });

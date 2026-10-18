@@ -44,6 +44,11 @@ app.use(
 );
 
 app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  next();
+});
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => {
   if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
@@ -56,11 +61,6 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim());
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && !allowed.includes(origin) && !(!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin))) return res.status(403).json({ success: false, error: 'Request origin is not allowed.' });
-  next();
-});
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'private, no-store');
-  res.set('X-Content-Type-Options', 'nosniff');
   next();
 });
 
@@ -89,22 +89,10 @@ router.get('/', (req, res) => {
 
 // Health Check
 router.get('/health', async (req, res) => {
-  let flwupConnected = false;
-  let booranConnected = false;
-  try {
-    const fDb = await getFlwupDb();
-    await fDb.command({ ping: 1 });
-    flwupConnected = true;
-  } catch (e) {
-    flwupConnected = false;
-  }
-  try {
-    const bDb = await getBooranDb();
-    await bDb.command({ ping: 1 });
-    booranConnected = true;
-  } catch (e) {
-    booranConnected = false;
-  }
+  const [flwupConnected, booranConnected] = await Promise.all([
+    getFlwupDb().then((db) => db.command({ ping: 1 }, { maxTimeMS: 3000 })).then(() => true, () => false),
+    getBooranDb().then((db) => db.command({ ping: 1 }, { maxTimeMS: 3000 })).then(() => true, () => false),
+  ]);
   res.status(flwupConnected && booranConnected ? 200 : 503).json({
     status: flwupConnected && booranConnected ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
@@ -684,8 +672,9 @@ app.use('/', router);
 app.use((req, res) => res.status(404).json({ success: false, error: 'Endpoint not found.' }));
 app.use((error, req, res, next) => {
   console.error('API request failed:', error.message);
-  const status = error.status === 413 ? 413 : error instanceof SyntaxError ? 400 : 500;
-  res.status(status).json({ success: false, error: status === 400 ? 'Invalid JSON request.' : status === 413 ? 'Request is too large.' : 'The request could not be completed.' });
+  const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 500 ? error.status : error instanceof SyntaxError ? 400 : 500;
+  const message = { 400: 'Invalid request.', 413: 'Request is too large.', 415: 'The request content type or encoding is not supported.' };
+  res.status(status).json({ success: false, error: message[status] || 'The request could not be completed.' });
 });
 
 return app;
