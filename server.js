@@ -1,42 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
-const { text, escapeRegex, pageQuery } = require('./lib/query');
+const { text, escapeRegex, pageQuery, leadQuery, vehicleQuery, actionQuery } = require('./lib/query');
 const { scopedDatabase } = require('./lib/access');
 const { installAuth } = require('./lib/auth');
+const { invalid, dealership, serializeLead, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
+const { changeHold, serializeVehicle } = require('./lib/vehicle-holds');
 
 
 require('dotenv').config();
-
-const app = express();
-const PORT = process.env.PORT || 5001;
-
-// CORS setup for production (Vercel & Custom Domains)
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
-      callback(null, !origin || allowed.includes(origin) || (!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin)));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  })
-);
-
-app.disable('x-powered-by');
-app.use(express.json({ limit: '100kb' }));
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim());
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && !allowed.includes(origin) && !(!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin))) return res.status(403).json({ success: false, error: 'Request origin is not allowed.' });
-  next();
-});
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'private, no-store');
-  res.set('X-Content-Type-Options', 'nosniff');
-  next();
-});
 
 // Reuse a connected pool and its in-flight promise across serverless requests.
 const connections = new Map();
@@ -54,8 +26,46 @@ async function database(envKey) {
   }
   return connections.get(envKey);
 }
-const getFlwupDb = async (req) => { const db = await database('MONGODB_URI_FLWUP'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
-const getBooranDb = async (req) => { const db = await database('MONGODB_URI_BOORAN'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
+
+function createApp({ database: resolveDatabase = database } = {}) {
+const app = express();
+
+// CORS setup for production (Vercel & Custom Domains)
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
+      callback(null, !origin || allowed.includes(origin) || (!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin)));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  })
+);
+
+app.disable('x-powered-by');
+app.use(express.json({ limit: '100kb' }));
+app.use((req, res, next) => {
+  if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
+    if (req.body === undefined && !req.headers['content-length'] && !req.headers['transfer-encoding']) req.body = {};
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({ success: false, error: 'The request body must be a JSON object.' });
+  }
+  next();
+});
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim());
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && !allowed.includes(origin) && !(!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin))) return res.status(403).json({ success: false, error: 'Request origin is not allowed.' });
+  next();
+});
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  next();
+});
+
+const getFlwupDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_FLWUP'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
+const getBooranDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_BOORAN'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
 
 // Router for all API routes (mounted at both /api and / for seamless Vercel compatibility)
 const router = express.Router();
@@ -107,82 +117,21 @@ router.get('/health', async (req, res) => {
 
 // ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
 
-installAuth(router, () => database('MONGODB_URI_FLWUP'));
+installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
 
 router.get('/leads', async (req, res) => {
   try {
     const db = await getFlwupDb(req);
     const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'leads', 'created_at');
 
-    const { status, dealership, owner, search, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
-
-    const query = {};
-
-    if (status && status !== 'all' && status !== 'All') {
-      query.status = status;
-    }
-
-    if (dealership && dealership !== 'all' && dealership !== 'All Locations' && dealership !== 'All') {
-      query.dealership_name = new RegExp(escapeRegex(dealership), 'i');
-    }
-
-    if (owner && owner !== 'all' && owner !== 'All') {
-      query.owner_name = new RegExp(escapeRegex(owner), 'i');
-    }
-
-    if (search && search.trim()) {
-      const s = escapeRegex(search);
-      query.$or = [
-        { customer_name: { $regex: s, $options: 'i' } },
-        { customer_phone: { $regex: s, $options: 'i' } },
-        { customer_email: { $regex: s, $options: 'i' } },
-        { vehicle_model: { $regex: s, $options: 'i' } },
-        { vehicle_make: { $regex: s, $options: 'i' } },
-        { deal_id: { $regex: s, $options: 'i' } },
-      ];
-    }
-
+    const query = leadQuery(req.query);
 
     const [leads, total] = await Promise.all([
       db.collection('leads').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
       db.collection('leads').countDocuments(query),
     ]);
 
-    const formattedLeads = leads.map((l) => ({
-      _id: l._id.toString(),
-      id: l._id.toString(),
-      deal_id: l.deal_id,
-      name: l.customer_name || 'Anonymous Prospect',
-      initials: (l.customer_name || 'PR')
-        .split(' ')
-        .map((n) => n[0])
-        .join('')
-        .slice(0, 2)
-        .toUpperCase(),
-      phone: l.customer_phone || '',
-      email: l.customer_email || '',
-      vehicle: l.vehicle_make ? `${l.vehicle_make} ${l.vehicle_model || ''}`.trim() : (l.vehicle_model || 'Unspecified Vehicle'),
-      make: l.vehicle_make || 'BYD',
-      model: l.vehicle_model || '',
-      status: l.status || 'new_lead',
-      dealership: l.dealership_name || 'Booran Motors',
-      dealership_name: l.dealership_name || 'Booran Motors',
-      dealer_code: l.dealer_code || 'BOORAN',
-      owner_name: l.owner_name || 'Unassigned',
-      assignedTo: l.owner_name || 'Unassigned',
-      source: l.source || 'Manual',
-      created_at: l.created_at || l.createdAt || new Date().toISOString(),
-      first_contact_at: l.first_contact_at,
-      minutes_to_first_contact: l.minutes_to_first_contact,
-      first_followup_due_at: l.first_followup_due_at,
-      had_contact_opportunity: l.had_contact_opportunity,
-      follow_ups_sent: l.follow_ups_sent || 0,
-      priority: l.status === 'new_lead' || (l.minutes_to_first_contact && l.minutes_to_first_contact > 60),
-      testDrive: l.test_drive,
-      tradeIn: l.trade_in,
-      diary_entries: l.diary_entries || [],
-      post_sales_followup: l.post_sales_followup,
-    }));
+    const formattedLeads = leads.map(serializeLead);
 
     res.json({
       success: true,
@@ -196,7 +145,7 @@ router.get('/leads', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching leads:', err);
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -216,42 +165,21 @@ router.get('/leads/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    res.json({ success: true, data: lead });
+    res.json({ success: true, data: serializeLead(lead) });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.post('/leads', async (req, res) => {
-  if (!text(req.body.name || req.body.customer_name)) return res.status(400).json({ success: false, error: 'A customer name is required.' });
   try {
+    const newLead = createLead(req.body, req.user);
     const db = await getFlwupDb(req);
-    const newLead = {
-      deal_id: 'BOORAN-' + Math.random().toString(36).substring(2, 9).toUpperCase(),
-      dealership_name: req.body.dealership_name || 'BYD South Morang',
-      dealer_code: 'BOORAN',
-      owner_name: req.body.owner_name || 'Lewis Dannock',
-      source: req.body.source || 'Walk-in Showroom',
-      customer_name: req.body.name || req.body.customer_name,
-      customer_phone: req.body.phone || req.body.customer_phone || '',
-      customer_email: req.body.email || req.body.customer_email || '',
-      vehicle_make: req.body.vehicle_make || 'BYD',
-      vehicle_model: req.body.vehicle_model || req.body.vehicle || 'Sealion 7',
-      created_at: new Date().toISOString(),
-      status: req.body.status || 'new_lead',
-      had_contact_opportunity: true,
-      follow_ups_sent: 0,
-      diary_entries: req.body.notes
-        ? [{ author: 'Sales Floor', date: new Date().toISOString(), note: req.body.notes }]
-        : [],
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
 
     const result = await db.collection('leads').insertOne(newLead);
-    res.status(201).json({ success: true, data: { ...newLead, _id: result.insertedId } });
+    res.status(201).json({ success: true, data: serializeLead({ ...newLead, _id: result.insertedId }) });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -266,31 +194,13 @@ router.patch('/leads/:id', async (req, res) => {
       query = { deal_id: id };
     }
 
-    const allowedFields = ['status', 'owner_name', 'assignedTo', 'dealership_name', 'customer_name', 'customer_phone', 'customer_email', 'vehicle_make', 'vehicle_model', 'notes', 'testDrive', 'tradeIn', 'newNote', 'author'];
-    const updateFields = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedFields.includes(key)));
-    updateFields.updatedAt = new Date();
-    delete updateFields._id;
-
-    let updateDoc = { $set: updateFields };
-    if (req.body.newNote) {
-      delete updateFields.newNote;
-      updateDoc = {
-        $set: updateFields,
-        $push: {
-          diary_entries: {
-            author: req.body.author || 'Megan Taylor',
-            date: new Date().toISOString(),
-            note: req.body.newNote,
-          },
-        },
-      };
-    }
+    const updateDoc = leadUpdate(req.body, req.user);
 
     const result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Lead not found.' });
-    res.json({ success: true, data: result });
+    res.json({ success: true, data: serializeLead(result) });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -303,7 +213,7 @@ router.get('/crm/stats', async (req, res) => {
       db.collection('leads').aggregate([{ $group: { _id: '$dealership_name', count: { $sum: 1 } } }]).toArray(),
     ]);
 
-    const statusCounts = {};
+    const statusCounts = Object.create(null);
     statusBreakdown.forEach((s) => {
       statusCounts[s._id || 'unknown'] = s.count;
     });
@@ -322,7 +232,7 @@ router.get('/crm/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -332,7 +242,7 @@ router.get('/crm/rooftops', async (req, res) => {
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -343,7 +253,7 @@ router.get('/crm/organization', async (req, res) => {
     const org = await db.collection('organizations').findOne();
     res.json({ success: true, data: org });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -351,10 +261,10 @@ router.get('/staff', async (req, res) => {
   try {
     const db = await getFlwupDb(req);
     const ownersAgg = await db.collection('leads').aggregate([
-      { $match: { owner_name: { $nin: [null, ''] } } },
+      { $match: { owner_name: { $type: 'string', $nin: [null, ''] } } },
       {
         $group: {
-          _id: '$owner_name',
+          _id: { name: '$owner_name', dealership: '$dealership_name' },
           dealership: { $first: '$dealership_name' },
           totalLeads: { $sum: 1 },
           soldCount: {
@@ -369,8 +279,8 @@ router.get('/staff', async (req, res) => {
     ]).toArray();
 
     const staffMembers = ownersAgg.map((s, idx) => ({
-      _id: 'staff-' + idx,
-      name: s._id,
+      _id: `${s._id.name}:${s._id.dealership || ''}`,
+      name: s._id.name,
       role: 'Sales Consultant',
       position: 'Senior Automotive Consultant',
       site: s.dealership || 'Booran Motors',
@@ -380,7 +290,7 @@ router.get('/staff', async (req, res) => {
       followingUpCount: s.followingUpCount,
       conversionRate: s.totalLeads > 0 ? ((s.soldCount / s.totalLeads) * 100).toFixed(1) + '%' : '0%',
       loadCapacity: Math.min(100, Math.round((s.followingUpCount / 25) * 100)),
-      initials: s._id
+      initials: String(s._id.name || 'Unassigned')
         .split(' ')
         .map((p) => p[0])
         .join('')
@@ -395,7 +305,7 @@ router.get('/staff', async (req, res) => {
       availableSites: Array.from(new Set(staffMembers.map((member) => member.site))),
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -406,43 +316,7 @@ router.get('/inventory/vehicles', async (req, res) => {
     const db = await getBooranDb(req);
     const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'vehicles', 'daysInStock');
 
-    const { category, agingBucket, rooftop, make, search, status, sortBy = 'daysInStock', sortOrder = 'desc' } = req.query;
-
-    const query = {};
-
-    if (category && category !== 'all' && category !== 'All') {
-      query.category = category;
-    }
-
-    if (agingBucket && agingBucket !== 'all' && agingBucket !== 'All') {
-      query.agingBucket = agingBucket;
-    }
-
-    if (rooftop && rooftop !== 'all' && rooftop !== 'All Locations' && rooftop !== 'All') {
-      query.rooftopName = new RegExp(escapeRegex(rooftop), 'i');
-    }
-
-    if (make && make !== 'all' && make !== 'All') {
-      query.make = new RegExp(`^${escapeRegex(make)}$`, 'i');
-    }
-
-    if (status && status !== 'all' && status !== 'All') {
-      query.status = status;
-    }
-
-    if (search && search.trim()) {
-      const s = escapeRegex(search);
-      query.$or = [
-        { stockNumber: { $regex: s, $options: 'i' } },
-        { vin: { $regex: s, $options: 'i' } },
-        { make: { $regex: s, $options: 'i' } },
-        { model: { $regex: s, $options: 'i' } },
-        { variant: { $regex: s, $options: 'i' } },
-        { colour: { $regex: s, $options: 'i' } },
-        { rego: { $regex: s, $options: 'i' } },
-      ];
-    }
-
+    const query = vehicleQuery(req.query);
 
     const [vehicles, total] = await Promise.all([
       db.collection('vehicles').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
@@ -451,7 +325,7 @@ router.get('/inventory/vehicles', async (req, res) => {
 
     res.json({
       success: true,
-      data: vehicles,
+      data: vehicles.map((vehicle) => serializeVehicle(vehicle)),
       pagination: {
         total,
         page,
@@ -461,7 +335,7 @@ router.get('/inventory/vehicles', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching inventory vehicles:', err);
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -481,9 +355,9 @@ router.get('/inventory/vehicles/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Vehicle not found' });
     }
 
-    res.json({ success: true, data: vehicle });
+    res.json({ success: true, data: serializeVehicle(vehicle) });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -491,8 +365,6 @@ router.post('/inventory/vehicles/:id/soft-hold', async (req, res) => {
   try {
     const db = await getBooranDb(req);
     const { id } = req.params;
-    const { prospectName, notes, consultant } = req.body;
-
     let query;
     try {
       query = { _id: new ObjectId(id) };
@@ -500,26 +372,10 @@ router.post('/inventory/vehicles/:id/soft-hold', async (req, res) => {
       query = { stockNumber: id };
     }
 
-    const updateDoc = {
-      $set: {
-        softHold: {
-          held: true,
-          prospectName: prospectName || 'Valued Customer',
-          notes: notes || 'Showroom Soft Hold for test drive',
-          consultant: consultant || 'Megan Taylor',
-          heldAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
-        },
-        status: 'Soft Hold',
-        updatedAt: new Date(),
-      },
-    };
-
-    const result = await db.collection('vehicles').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
-    if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
+    const result = await changeHold(db.collection('vehicles'), query, req.body, req.user);
     res.json({ success: true, message: 'Vehicle placed on soft hold', data: result });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -534,16 +390,10 @@ router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
       query = { stockNumber: id };
     }
 
-    const updateDoc = {
-      $unset: { softHold: '' },
-      $set: { status: 'In Stock', updatedAt: new Date() },
-    };
-
-    const result = await db.collection('vehicles').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
-    if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
+    const result = await changeHold(db.collection('vehicles'), query, req.body, req.user, true);
     res.json({ success: true, message: 'Vehicle hold released', data: result });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -553,35 +403,7 @@ router.get('/inventory/action-items', async (req, res) => {
     const db = await getBooranDb(req);
     const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'actions', 'createdAt');
 
-    const { actionType, priority, status = 'open', rooftop, search } = req.query;
-
-    const query = {};
-
-    if (actionType && actionType !== 'all' && actionType !== 'All') {
-      query.actionType = actionType;
-    }
-
-    if (priority && priority !== 'all' && priority !== 'All') {
-      query.priority = priority;
-    }
-
-    if (status && status !== 'all' && status !== 'All') {
-      query.status = status;
-    }
-
-    if (rooftop && rooftop !== 'all' && rooftop !== 'All Locations' && rooftop !== 'All') {
-      query.rooftopName = new RegExp(escapeRegex(rooftop), 'i');
-    }
-
-    if (search && search.trim()) {
-      const s = escapeRegex(search);
-      query.$or = [
-        { vehicleTitle: { $regex: s, $options: 'i' } },
-        { stockNumber: { $regex: s, $options: 'i' } },
-        { vin: { $regex: s, $options: 'i' } },
-        { reason: { $regex: s, $options: 'i' } },
-      ];
-    }
+    const query = actionQuery(req.query);
 
     const [items, total] = await Promise.all([
       db.collection('actionitems').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
@@ -599,7 +421,7 @@ router.get('/inventory/action-items', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -607,23 +429,15 @@ router.patch('/inventory/action-items/:id', async (req, res) => {
   try {
     const db = await getBooranDb(req);
     const { id } = req.params;
-    const { status, resolvedNotes } = req.body;
-
+    if (!ObjectId.isValid(id)) invalid('Invalid action item ID.');
     const query = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        status: status || 'resolved',
-        resolvedAt: new Date().toISOString(),
-        resolvedNotes: resolvedNotes || 'Actioned by Sales Manager',
-        updatedAt: new Date(),
-      },
-    };
+    const updateDoc = actionUpdate(req.body, req.user);
 
     const result = await db.collection('actionitems').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
     res.json({ success: true, message: 'Action item updated', data: result });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -633,7 +447,7 @@ router.get('/inventory/rooftops', async (req, res) => {
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -683,17 +497,17 @@ router.get('/inventory/stats', async (req, res) => {
       ]).toArray(),
     ]);
 
-    const agingBuckets = {};
+    const agingBuckets = Object.create(null);
     agingBucketsAgg.forEach((b) => {
       agingBuckets[b._id || 'unknown'] = b.count;
     });
 
-    const categories = {};
+    const categories = Object.create(null);
     categoriesAgg.forEach((c) => {
       categories[c._id || 'unknown'] = c.count;
     });
 
-    const actionTypes = {};
+    const actionTypes = Object.create(null);
     actionTypeAgg.forEach((a) => {
       actionTypes[a._id || 'unknown'] = a.count;
     });
@@ -715,7 +529,7 @@ router.get('/inventory/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -730,11 +544,10 @@ router.get('/appointments', async (req, res) => {
       query.when = {};
       for (const [key, operator] of [['from', '$gte'], ['to', '$lt']]) {
         if (!req.query[key]) continue;
-        const date = new Date(req.query[key]);
-        if (!Number.isFinite(date.getTime())) return res.status(400).json({ success: false, error: 'Invalid appointment date range.' });
-        query.when[operator] = date.toISOString();
+        query.when[operator] = dateBoundary(req.query[key]);
       }
     }
+    if (query.when?.$gte && query.when?.$lt && query.when.$gte >= query.when.$lt) invalid('The end date must follow the start date.');
     if (req.query.type && req.query.type !== 'all') query.type = req.query.type;
     const [data, total] = await Promise.all([
       db.collection('appointments').find(query).sort({ when: 1, _id: 1 }).skip(skip).limit(limit).toArray(),
@@ -742,28 +555,26 @@ router.get('/appointments', async (req, res) => {
     ]);
     res.json({ success: true, data, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Unable to load appointments.' });
+    res.status(error.status === 400 ? 400 : 500).json({ success: false, error: error.status === 400 ? error.message : 'Unable to load appointments.' });
   }
 });
 router.post('/appointments', async (req, res) => {
-  const when = new Date(req.body.when);
-  const duration = Number(req.body.duration || 45);
-  if (!text(req.body.prospectName) || !Number.isFinite(when.getTime()) || !Number.isInteger(duration) || duration < 5 || duration > 480) {
-    return res.status(400).json({ success: false, error: 'Provide a customer, valid appointment time and duration (5?480 minutes).' });
-  }
   try {
+    const input = appointmentInput(req.body);
     const db = await getFlwupDb(req);
-    const appointment = {
-      dealership: req.user.role === 'super_admin' ? text(req.body.dealership) || 'South Morang' : req.user.site,
-      leadId: text(req.body.leadId), prospectName: text(req.body.prospectName),
-      consultantName: text(req.body.consultantName), vehicle: text(req.body.vehicle),
-      type: text(req.body.type) || 'Test Drive', when: when.toISOString(), duration,
-      notes: text(req.body.notes, 2000), status: 'Booked', createdAt: new Date().toISOString(),
-    };
+    let linkedLead = null;
+    if (req.body.leadId) {
+      const leadId = text(req.body.leadId);
+      linkedLead = await db.collection('leads').findOne(ObjectId.isValid(leadId) ? { _id: new ObjectId(leadId) } : { deal_id: leadId });
+      if (!linkedLead) return res.status(404).json({ success: false, error: 'Lead not found in your authorised locations.' });
+    }
+    const site = dealership(req.body.dealership || linkedLead?.dealership_name);
+    if (linkedLead && site.toLowerCase() !== linkedLead.dealership_name.toLowerCase()) invalid('The appointment must use the linked lead dealership.');
+    const appointment = { ...input, dealership: site };
     const result = await db.collection('appointments').insertOne(appointment);
     res.status(201).json({ success: true, data: { ...appointment, _id: result.insertedId.toString() } });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Unable to save appointment. Please retry.' });
+    res.status([400, 403].includes(error.status) ? error.status : 500).json({ success: false, error: [400, 403].includes(error.status) ? error.message : 'Unable to save appointment. Please retry.' });
   }
 });
 
@@ -809,7 +620,7 @@ router.get('/unified/summary', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -857,13 +668,13 @@ router.get('/unified/search', async (req, res) => {
     res.json({
       success: true,
       data: {
-        leads,
-        vehicles,
+        leads: leads.map(serializeLead),
+        vehicles: vehicles.map((vehicle) => serializeVehicle(vehicle)),
         actionItems,
       },
     });
   } catch (err) {
-    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -877,13 +688,17 @@ app.use((error, req, res, next) => {
   res.status(status).json({ success: false, error: status === 400 ? 'Invalid JSON request.' : status === 413 ? 'Request is too large.' : 'The request could not be completed.' });
 });
 
+return app;
+}
+
+const app = createApp();
 // Start server if run directly (local development)
 if (!process.env.VERCEL) {
   if (require.main === module) {
-    app.listen(PORT, () => {
+    app.listen(process.env.PORT || 5001, () => {
       console.log(`=======================================================`);
-      console.log(`Booran Motors Sales Floor API running on port ${PORT}`);
-      console.log(`Health endpoint: http://localhost:${PORT}/api/health`);
+      console.log(`Booran Motors Sales Floor API running on port ${process.env.PORT || 5001}`);
+      console.log(`Health endpoint: http://localhost:${process.env.PORT || 5001}/api/health`);
       console.log(`=======================================================`);
     });
   }
@@ -891,3 +706,4 @@ if (!process.env.VERCEL) {
 
 // Export for Vercel Serverless Function
 module.exports = app;
+module.exports.createApp = createApp;

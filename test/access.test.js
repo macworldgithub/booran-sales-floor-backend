@@ -9,7 +9,10 @@ test('site scope cannot be replaced by a user supplied location or OR condition'
   const query = { rooftopName: 'Booran Cheltenham', $or: [{ stockNumber: '123' }] };
   const result = scopeQuery(manager, 'vehicles', query);
   assert.equal(result.$and[0], query);
-  assert.equal(result.$and[1].rooftopName.$regex, '\\bSouth Morang\\b');
+  const condition = result.$and[1].rooftopName;
+  const regex = new RegExp(condition.$regex, condition.$options);
+  assert.equal(regex.test('BYD South Morang'), true);
+  assert.equal(regex.test('Booran Cheltenham'), false);
   assert.deepEqual(scopeQuery({ role: 'super_admin' }, 'vehicles', query), query);
   assert.deepEqual(scopeQuery(manager, 'feedlogs').$and[1], { _id: { $exists: false } });
 });

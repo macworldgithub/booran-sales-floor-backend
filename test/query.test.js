@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { escapeRegex, pageQuery, text } = require('../lib/query');
+const { escapeRegex, pageQuery, text, locationCondition } = require('../lib/query');
 
 test('search treats user regex metacharacters as literal text', () => {
   const search = 'Ford (EV) [2026] +.*?^$|\\';
@@ -8,6 +8,15 @@ test('search treats user regex metacharacters as literal text', () => {
   assert.ok(regex.test(search));
   assert.equal(regex.test('Ford EV'), false);
   assert.equal(text({ $ne: null }), '');
+});
+
+test('location values matching object prototype properties remain literal names', () => {
+  for (const name of ['constructor', '__proto__', 'toString']) {
+    const condition = locationCondition(name);
+    const regex = new RegExp(condition.$regex, condition.$options);
+    assert.equal(regex.test(name), true);
+    assert.equal(regex.test('BYD South Morang'), false);
+  }
 });
 
 test('pagination bounds malformed and extreme inputs', () => {

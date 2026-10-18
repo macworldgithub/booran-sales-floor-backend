@@ -50,3 +50,21 @@ Leads, inventory, actions, appointments and feed logs return `pagination: { page
 ## Tests
 
 `npm test` covers literal search, malformed pagination, stable/allowlisted sorts, location queries, cross-site write rejection, scoped ID updates/aggregates, password hashing, and migration identity/conflict protection. HTTP checks additionally verified both logins, cookie flags, unauthenticated rejection, cross-location access, forged location filters, global-feed denial, CSRF protection in the frontend proxy, and logout revocation. Business records were not modified by these smoke checks.
+
+## Dealership filter boundaries
+
+Specific rooftop filters match the complete dealership name (case-insensitively), rather than a substring. The South Morang account covers the South Morang location group: BYD South Morang, Chery South Morang, South Morang Hyundai, and South Morang Kia. Selecting all removes only the optional list filter; it never removes the account's authorised location boundary. Add any new South Morang franchise to the central location group in `lib/query.js` before enabling its access.
+
+Lead status/owner/search, inventory category/aging/status/make/search, and action type/priority/status/search predicates combine with the selected location. Record and count queries receive the same conditions. Staff totals group each consultant by actual dealership after applying scope. Bookings carry their selected dealership and reject cross-scope lead references or writes.
+
+Filter regression fixtures test individual and combined predicates, empty results, all-status behaviour, exact names versus lookalikes, matching read/count scopes, and the South Morang boundary. Live database re-verification for this change was blocked by DNS timeouts in the implementation environment.
+
+## Write integrity and regression checks
+
+Lead list, detail, search, create, and update responses share one serializer. Writes validate text, enums, nested fields, appointment dates, durations, and linked dealerships. Notes and hold consultant names use the verified account identity. Validation failures return 400; unavailable vehicle transitions return 409.
+
+Vehicle holds use conditional atomic updates. Sold units cannot be held or released into stock, active holds cannot be overwritten, and expired holds are shown and filtered as available stock. Resolving an action records its completion; reopening or marking it in progress clears the completion timestamp.
+
+`test/api.test.js` runs the actual Express routes, authentication, access scopes, validators, and queries against isolated in-memory storage. It covers login/logout/expiry, manager and super admin access, filters with pagination totals, malformed writes, lead response consistency, concurrent/expired holds, and appointments without touching the live database.
+
+Hold release requests must send the displayed `holdId` (or `heldAt` for older records). The conditional update matches that exact hold, so a delayed release cannot clear a replacement hold. Deploy the matching frontend with this API change. Empty action updates return 400, cleared lead details stay cleared, malformed stored sessions return 401, and date filters reject impossible calendar days.
