@@ -1,14 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
-const dns = require('dns');
+const { text, escapeRegex, pageQuery } = require('./lib/query');
+const { scopedDatabase } = require('./lib/access');
+const { installAuth } = require('./lib/auth');
 
-// Configure reliable DNS servers for MongoDB Atlas SRV resolution
-try {
-  dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
-} catch (e) {
-  console.warn('DNS server override warning:', e.message);
-}
 
 require('dotenv').config();
 
@@ -19,8 +15,8 @@ const PORT = process.env.PORT || 5001;
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow any origin or null (for mobile/curl)
-      callback(null, true);
+      const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
+      callback(null, !origin || allowed.includes(origin) || (!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin)));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -28,91 +24,48 @@ app.use(
   })
 );
 
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '100kb' }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim());
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && !allowed.includes(origin) && !(!process.env.VERCEL && /^http:\/\/localhost:\d+$/.test(origin))) return res.status(403).json({ success: false, error: 'Request origin is not allowed.' });
+  next();
+});
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  next();
+});
 
-// In-memory appointments store with default upcoming showroom visits
-let appointmentsStore = [
-  {
-    _id: 'appt-1',
-    leadId: 'sample-1',
-    prospectName: 'Cameron Bale',
-    consultantName: 'Lewis Dannock',
-    vehicle: 'BYD Atto 2 Dmi',
-    type: 'Test Drive',
-    when: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),
-    duration: 45,
-    notes: 'South Morang test track · Customer looking to finance via novated lease',
-    status: 'Booked',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    _id: 'appt-2',
-    leadId: 'sample-2',
-    prospectName: 'Sarah Jenkins',
-    consultantName: 'Denis Dzemailoski',
-    vehicle: 'BYD Sealion 7',
-    type: 'Showroom Visit',
-    when: new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
-    duration: 30,
-    notes: 'Colour selection and trade-in valuation review',
-    status: 'Booked',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    _id: 'appt-3',
-    leadId: 'sample-3',
-    prospectName: 'Michael Chang',
-    consultantName: 'Dylan K',
-    vehicle: 'Hyundai Kona Electric',
-    type: 'Test Drive',
-    when: new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
-    duration: 60,
-    notes: 'Highway loop comparison vs Kia EV5',
-    status: 'Booked',
-    createdAt: new Date().toISOString(),
-  },
-];
-
-// Serverless-ready MongoDB connection caching
-let cachedFlwupClient = null;
-let cachedBooranClient = null;
-let cachedFlwupDb = null;
-let cachedBooranDb = null;
-
-async function getFlwupDb() {
-  if (cachedFlwupDb) return cachedFlwupDb;
-  const uri = process.env.MONGODB_URI_FLWUP;
-  if (!uri) throw new Error('MONGODB_URI_FLWUP is not defined in environment');
-  if (!cachedFlwupClient) {
-    cachedFlwupClient = new MongoClient(uri, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 10000,
+// Reuse a connected pool and its in-flight promise across serverless requests.
+const connections = new Map();
+async function database(envKey) {
+  if (!connections.has(envKey)) {
+    const uri = process.env[envKey];
+    if (!uri) throw new Error(`${envKey} is not configured`);
+    const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000 });
+    const pending = client.connect().then(() => client.db()).catch(async (error) => {
+      connections.delete(envKey);
+      await client.close().catch(() => {});
+      throw error;
     });
-    await cachedFlwupClient.connect();
+    connections.set(envKey, pending);
   }
-  cachedFlwupDb = cachedFlwupClient.db();
-  return cachedFlwupDb;
+  return connections.get(envKey);
 }
-
-async function getBooranDb() {
-  if (cachedBooranDb) return cachedBooranDb;
-  const uri = process.env.MONGODB_URI_BOORAN;
-  if (!uri) throw new Error('MONGODB_URI_BOORAN is not defined in environment');
-  if (!cachedBooranClient) {
-    cachedBooranClient = new MongoClient(uri, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 10000,
-    });
-    await cachedBooranClient.connect();
-  }
-  cachedBooranDb = cachedBooranClient.db();
-  return cachedBooranDb;
-}
+const getFlwupDb = async (req) => { const db = await database('MONGODB_URI_FLWUP'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
+const getBooranDb = async (req) => { const db = await database('MONGODB_URI_BOORAN'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
 
 // Router for all API routes (mounted at both /api and / for seamless Vercel compatibility)
 const router = express.Router();
+router.use((req, res, next) => {
+  for (const key of Object.keys(req.query)) {
+    if (typeof req.query[key] !== 'string') return res.status(400).json({ success: false, error: 'Query parameters must be single text values.' });
+    req.query[key] = text(req.query[key]);
+  }
+  next();
+});
 
 // Root check
 router.get('/', (req, res) => {
@@ -142,8 +95,8 @@ router.get('/health', async (req, res) => {
   } catch (e) {
     booranConnected = false;
   }
-  res.json({
-    status: 'ok',
+  res.status(flwupConnected && booranConnected ? 200 : 503).json({
+    status: flwupConnected && booranConnected ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
     databases: {
       flwup_crm: flwupConnected ? 'connected' : 'error',
@@ -154,51 +107,12 @@ router.get('/health', async (req, res) => {
 
 // ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
 
-router.post('/auth/login', async (req, res) => {
-  const { email } = req.body;
-  const user = {
-    id: 'user-megan-1',
-    name: email?.toLowerCase().includes('paul') ? 'Paul Booran' : 'Megan Taylor',
-    email: email || 'megant@booranmotors.com.au',
-    role: email?.toLowerCase().includes('paul') ? 'principal' : 'manager',
-    title: email?.toLowerCase().includes('paul') ? 'Dealer Principal' : 'Group Marketing & Operations',
-    site: 'Booran Motors Group - All Locations',
-    avatar: email?.toLowerCase().includes('paul') ? 'PB' : 'MT',
-  };
-
-  res.json({
-    success: true,
-    data: {
-      access_token: 'booran_jwt_token_' + Date.now(),
-      user,
-      must_change_password: false,
-    },
-  });
-});
-
-router.get('/auth/me', async (req, res) => {
-  res.json({
-    success: true,
-    data: {
-      id: 'user-megan-1',
-      name: 'Megan Taylor',
-      email: 'megant@booranmotors.com.au',
-      role: 'manager',
-      title: 'Group Marketing & Operations',
-      site: 'Booran Motors Group - All Locations',
-      avatar: 'MT',
-    },
-  });
-});
-
-// ─── CRM & LEADS ENDPOINTS (FLWUP_CRM) ────────────────────────────────────────
+installAuth(router, () => database('MONGODB_URI_FLWUP'));
 
 router.get('/leads', async (req, res) => {
   try {
-    const db = await getFlwupDb();
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
-    const skip = (page - 1) * limit;
+    const db = await getFlwupDb(req);
+    const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'leads', 'created_at');
 
     const { status, dealership, owner, search, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
 
@@ -209,15 +123,15 @@ router.get('/leads', async (req, res) => {
     }
 
     if (dealership && dealership !== 'all' && dealership !== 'All Locations' && dealership !== 'All') {
-      query.dealership_name = new RegExp(dealership, 'i');
+      query.dealership_name = new RegExp(escapeRegex(dealership), 'i');
     }
 
     if (owner && owner !== 'all' && owner !== 'All') {
-      query.owner_name = new RegExp(owner, 'i');
+      query.owner_name = new RegExp(escapeRegex(owner), 'i');
     }
 
     if (search && search.trim()) {
-      const s = search.trim();
+      const s = escapeRegex(search);
       query.$or = [
         { customer_name: { $regex: s, $options: 'i' } },
         { customer_phone: { $regex: s, $options: 'i' } },
@@ -228,8 +142,6 @@ router.get('/leads', async (req, res) => {
       ];
     }
 
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
     const [leads, total] = await Promise.all([
       db.collection('leads').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
@@ -284,13 +196,13 @@ router.get('/leads', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching leads:', err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/leads/:id', async (req, res) => {
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const { id } = req.params;
     let query;
     try {
@@ -306,13 +218,14 @@ router.get('/leads/:id', async (req, res) => {
 
     res.json({ success: true, data: lead });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.post('/leads', async (req, res) => {
+  if (!text(req.body.name || req.body.customer_name)) return res.status(400).json({ success: false, error: 'A customer name is required.' });
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const newLead = {
       deal_id: 'BOORAN-' + Math.random().toString(36).substring(2, 9).toUpperCase(),
       dealership_name: req.body.dealership_name || 'BYD South Morang',
@@ -338,13 +251,13 @@ router.post('/leads', async (req, res) => {
     const result = await db.collection('leads').insertOne(newLead);
     res.status(201).json({ success: true, data: { ...newLead, _id: result.insertedId } });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.patch('/leads/:id', async (req, res) => {
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const { id } = req.params;
     let query;
     try {
@@ -353,7 +266,9 @@ router.patch('/leads/:id', async (req, res) => {
       query = { deal_id: id };
     }
 
-    const updateFields = { ...req.body, updatedAt: new Date() };
+    const allowedFields = ['status', 'owner_name', 'assignedTo', 'dealership_name', 'customer_name', 'customer_phone', 'customer_email', 'vehicle_make', 'vehicle_model', 'notes', 'testDrive', 'tradeIn', 'newNote', 'author'];
+    const updateFields = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedFields.includes(key)));
+    updateFields.updatedAt = new Date();
     delete updateFields._id;
 
     let updateDoc = { $set: updateFields };
@@ -372,15 +287,16 @@ router.patch('/leads/:id', async (req, res) => {
     }
 
     const result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
+    if (!result) return res.status(404).json({ success: false, error: 'Lead not found.' });
     res.json({ success: true, data: result });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/crm/stats', async (req, res) => {
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const [total, statusBreakdown, rooftopBreakdown] = await Promise.all([
       db.collection('leads').countDocuments(),
       db.collection('leads').aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).toArray(),
@@ -406,35 +322,36 @@ router.get('/crm/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/crm/rooftops', async (req, res) => {
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/crm/organization', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ success: false, error: 'Super admin access is required.' });
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const org = await db.collection('organizations').findOne();
     res.json({ success: true, data: org });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/staff', async (req, res) => {
   try {
-    const db = await getFlwupDb();
+    const db = await getFlwupDb(req);
     const ownersAgg = await db.collection('leads').aggregate([
-      { $match: { owner_name: { $ne: null, $ne: '' } } },
+      { $match: { owner_name: { $nin: [null, ''] } } },
       {
         $group: {
           _id: '$owner_name',
@@ -475,17 +392,10 @@ router.get('/staff', async (req, res) => {
       success: true,
       data: staffMembers,
       total: staffMembers.length,
-      availableSites: [
-        'All Locations',
-        'BYD South Morang',
-        'Chery South Morang',
-        'South Morang Hyundai',
-        'South Morang Kia',
-        'Booran Cheltenham',
-      ],
+      availableSites: Array.from(new Set(staffMembers.map((member) => member.site))),
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -493,10 +403,8 @@ router.get('/staff', async (req, res) => {
 
 router.get('/inventory/vehicles', async (req, res) => {
   try {
-    const db = await getBooranDb();
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 24));
-    const skip = (page - 1) * limit;
+    const db = await getBooranDb(req);
+    const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'vehicles', 'daysInStock');
 
     const { category, agingBucket, rooftop, make, search, status, sortBy = 'daysInStock', sortOrder = 'desc' } = req.query;
 
@@ -511,11 +419,11 @@ router.get('/inventory/vehicles', async (req, res) => {
     }
 
     if (rooftop && rooftop !== 'all' && rooftop !== 'All Locations' && rooftop !== 'All') {
-      query.rooftopName = new RegExp(rooftop, 'i');
+      query.rooftopName = new RegExp(escapeRegex(rooftop), 'i');
     }
 
     if (make && make !== 'all' && make !== 'All') {
-      query.make = new RegExp(`^${make}$`, 'i');
+      query.make = new RegExp(`^${escapeRegex(make)}$`, 'i');
     }
 
     if (status && status !== 'all' && status !== 'All') {
@@ -523,7 +431,7 @@ router.get('/inventory/vehicles', async (req, res) => {
     }
 
     if (search && search.trim()) {
-      const s = search.trim();
+      const s = escapeRegex(search);
       query.$or = [
         { stockNumber: { $regex: s, $options: 'i' } },
         { vin: { $regex: s, $options: 'i' } },
@@ -535,8 +443,6 @@ router.get('/inventory/vehicles', async (req, res) => {
       ];
     }
 
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
     const [vehicles, total] = await Promise.all([
       db.collection('vehicles').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
@@ -555,13 +461,13 @@ router.get('/inventory/vehicles', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching inventory vehicles:', err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/inventory/vehicles/:id', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const { id } = req.params;
     let query;
     try {
@@ -577,13 +483,13 @@ router.get('/inventory/vehicles/:id', async (req, res) => {
 
     res.json({ success: true, data: vehicle });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.post('/inventory/vehicles/:id/soft-hold', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const { id } = req.params;
     const { prospectName, notes, consultant } = req.body;
 
@@ -610,15 +516,16 @@ router.post('/inventory/vehicles/:id/soft-hold', async (req, res) => {
     };
 
     const result = await db.collection('vehicles').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
+    if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
     res.json({ success: true, message: 'Vehicle placed on soft hold', data: result });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const { id } = req.params;
     let query;
     try {
@@ -633,19 +540,18 @@ router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
     };
 
     const result = await db.collection('vehicles').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
+    if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
     res.json({ success: true, message: 'Vehicle hold released', data: result });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 // ACTION ITEMS (Capital Trap / Price Reviews / Wholesale)
 router.get('/inventory/action-items', async (req, res) => {
   try {
-    const db = await getBooranDb();
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
-    const skip = (page - 1) * limit;
+    const db = await getBooranDb(req);
+    const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'actions', 'createdAt');
 
     const { actionType, priority, status = 'open', rooftop, search } = req.query;
 
@@ -664,11 +570,11 @@ router.get('/inventory/action-items', async (req, res) => {
     }
 
     if (rooftop && rooftop !== 'all' && rooftop !== 'All Locations' && rooftop !== 'All') {
-      query.rooftopName = new RegExp(rooftop, 'i');
+      query.rooftopName = new RegExp(escapeRegex(rooftop), 'i');
     }
 
     if (search && search.trim()) {
-      const s = search.trim();
+      const s = escapeRegex(search);
       query.$or = [
         { vehicleTitle: { $regex: s, $options: 'i' } },
         { stockNumber: { $regex: s, $options: 'i' } },
@@ -678,7 +584,7 @@ router.get('/inventory/action-items', async (req, res) => {
     }
 
     const [items, total] = await Promise.all([
-      db.collection('actionitems').find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+      db.collection('actionitems').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
       db.collection('actionitems').countDocuments(query),
     ]);
 
@@ -693,13 +599,13 @@ router.get('/inventory/action-items', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.patch('/inventory/action-items/:id', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const { id } = req.params;
     const { status, resolvedNotes } = req.body;
 
@@ -714,35 +620,41 @@ router.patch('/inventory/action-items/:id', async (req, res) => {
     };
 
     const result = await db.collection('actionitems').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
+    if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
     res.json({ success: true, message: 'Action item updated', data: result });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/inventory/rooftops', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 router.get('/inventory/feed-logs', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ success: false, error: 'Super admin access is required.' });
   try {
-    const db = await getBooranDb();
-    const logs = await db.collection('feedlogs').find().sort({ createdAt: -1 }).limit(10).toArray();
-    res.json({ success: true, data: logs });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    const db = await getBooranDb(req);
+    const { page, limit, skip, sort } = pageQuery(req.query, 'logs', 'createdAt');
+    const query = {};
+    if (req.query.status && req.query.status !== 'all') query.status = req.query.status;
+    if (req.query.search) query.$or = ['feedType', 'notes'].map((field) => ({ [field]: { $regex: escapeRegex(req.query.search), $options: 'i' } }));
+    const [data, total] = await Promise.all([db.collection('feedlogs').find(query).sort(sort).skip(skip).limit(limit).toArray(), db.collection('feedlogs').countDocuments(query)]);
+    res.json({ success: true, data, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Unable to load feed logs.' });
   }
 });
 
 router.get('/inventory/stats', async (req, res) => {
   try {
-    const db = await getBooranDb();
+    const db = await getBooranDb(req);
     const [
       totalVehicles,
       agingBucketsAgg,
@@ -803,40 +715,62 @@ router.get('/inventory/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 // ─── APPOINTMENTS & SHOWROOM TIMELINE ────────────────────────────────────────
 
-router.get('/appointments', (req, res) => {
-  res.json({ success: true, data: appointmentsStore });
+router.get('/appointments', async (req, res) => {
+  try {
+    const db = await getFlwupDb(req);
+    const { page, limit, skip } = pageQuery(req.query, 'appointments', 'when');
+    const query = {};
+    if (req.query.from || req.query.to) {
+      query.when = {};
+      for (const [key, operator] of [['from', '$gte'], ['to', '$lt']]) {
+        if (!req.query[key]) continue;
+        const date = new Date(req.query[key]);
+        if (!Number.isFinite(date.getTime())) return res.status(400).json({ success: false, error: 'Invalid appointment date range.' });
+        query.when[operator] = date.toISOString();
+      }
+    }
+    if (req.query.type && req.query.type !== 'all') query.type = req.query.type;
+    const [data, total] = await Promise.all([
+      db.collection('appointments').find(query).sort({ when: 1, _id: 1 }).skip(skip).limit(limit).toArray(),
+      db.collection('appointments').countDocuments(query),
+    ]);
+    res.json({ success: true, data, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Unable to load appointments.' });
+  }
 });
-
-router.post('/appointments', (req, res) => {
-  const newAppt = {
-    _id: 'appt-' + Date.now(),
-    leadId: req.body.leadId,
-    prospectName: req.body.prospectName || 'Customer',
-    consultantName: req.body.consultantName || 'Lewis Dannock',
-    vehicle: req.body.vehicle || 'BYD Range',
-    type: req.body.type || 'Test Drive',
-    when: req.body.when || new Date().toISOString(),
-    duration: req.body.duration || 45,
-    notes: req.body.notes || 'Melbourne CBD Loop',
-    status: 'Booked',
-    createdAt: new Date().toISOString(),
-  };
-  appointmentsStore.unshift(newAppt);
-  res.status(201).json({ success: true, data: newAppt });
+router.post('/appointments', async (req, res) => {
+  const when = new Date(req.body.when);
+  const duration = Number(req.body.duration || 45);
+  if (!text(req.body.prospectName) || !Number.isFinite(when.getTime()) || !Number.isInteger(duration) || duration < 5 || duration > 480) {
+    return res.status(400).json({ success: false, error: 'Provide a customer, valid appointment time and duration (5?480 minutes).' });
+  }
+  try {
+    const db = await getFlwupDb(req);
+    const appointment = {
+      dealership: req.user.role === 'super_admin' ? text(req.body.dealership) || 'South Morang' : req.user.site,
+      leadId: text(req.body.leadId), prospectName: text(req.body.prospectName),
+      consultantName: text(req.body.consultantName), vehicle: text(req.body.vehicle),
+      type: text(req.body.type) || 'Test Drive', when: when.toISOString(), duration,
+      notes: text(req.body.notes, 2000), status: 'Booked', createdAt: new Date().toISOString(),
+    };
+    const result = await db.collection('appointments').insertOne(appointment);
+    res.status(201).json({ success: true, data: { ...appointment, _id: result.insertedId.toString() } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Unable to save appointment. Please retry.' });
+  }
 });
-
-// ─── UNIFIED CROSS-DATABASE DASHBOARD & SEARCH ────────────────────────────────
 
 router.get('/unified/summary', async (req, res) => {
   try {
-    const fDb = await getFlwupDb();
-    const bDb = await getBooranDb();
+    const fDb = await getFlwupDb(req);
+    const bDb = await getBooranDb(req);
 
     const [
       leadsCount,
@@ -868,14 +802,14 @@ router.get('/unified/summary', async (req, res) => {
           openActionItems: actionItemsCount,
         },
         system: {
-          rooftopGroup: 'Booran Motors VIC',
-          activeRooftops: 4,
+          rooftopGroup: req.user.role === 'super_admin' ? 'Booran Motors VIC' : req.user.site,
+          activeRooftops: (await bDb.collection('rooftops').countDocuments()),
           lastSync: new Date().toISOString(),
         },
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
@@ -886,9 +820,9 @@ router.get('/unified/search', async (req, res) => {
       return res.json({ success: true, data: { leads: [], vehicles: [], actionItems: [] } });
     }
 
-    const regex = new RegExp(q.trim(), 'i');
-    const fDb = await getFlwupDb();
-    const bDb = await getBooranDb();
+    const regex = new RegExp(escapeRegex(q), 'i');
+    const fDb = await getFlwupDb(req);
+    const bDb = await getBooranDb(req);
 
     const [leads, vehicles, actionItems] = await Promise.all([
       fDb.collection('leads').find({
@@ -929,13 +863,19 @@ router.get('/unified/search', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status === 403 ? 403 : 500).json({ success: false, error: err.status === 403 ? 'You do not have access to this location.' : 'The request could not be completed. Please retry.' });
   }
 });
 
 // Mount router at both /api and / for seamless Vercel / serverless compatibility
 app.use('/api', router);
 app.use('/', router);
+app.use((req, res) => res.status(404).json({ success: false, error: 'Endpoint not found.' }));
+app.use((error, req, res, next) => {
+  console.error('API request failed:', error.message);
+  const status = error.status === 413 ? 413 : error instanceof SyntaxError ? 400 : 500;
+  res.status(status).json({ success: false, error: status === 400 ? 'Invalid JSON request.' : status === 413 ? 'Request is too large.' : 'The request could not be completed.' });
+});
 
 // Start server if run directly (local development)
 if (!process.env.VERCEL) {

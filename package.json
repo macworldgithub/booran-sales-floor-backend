@@ -5,7 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test",
+    "check": "node --check server.js",
+    "seed:accounts": "node scripts/seed-accounts.js",
+    "migrate:state": "node scripts/migrate-app-state.js"
   },
   "repository": {
     "type": "git",
@@ -25,5 +29,8 @@
     "dotenv": "^18.0.7",
     "express": "^4.21.2",
     "mongodb": "^7.7.0"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }
