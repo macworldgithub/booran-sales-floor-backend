@@ -43,6 +43,26 @@ Create a separate project rooted at `booran-sales-floor-backend`, framework Othe
 
 Before opening a deployment to staff, run `npm test` and `npm run check`, then verify account access over HTTPS. Health checks at `/api/health` return 503 when either database is unavailable.
 
+## Customer SMS and photo/video sharing
+
+Customer360 uses Mobile Message, following the Delivery Centre integration. Configure `MOBILEMESSAGE_USERNAME`, `MOBILEMESSAGE_PASSWORD` (or `MOBILEMESSAGE_API_KEY`) and `MOBILEMESSAGE_SENDER_ID` (or `MOBILEMESSAGE_FROM`) in the backend Vercel project. The sender must already be approved on that provider account. Credentials stay on the backend. See the [Mobile Message API documentation](https://mobilemessage.com.au/api-documentation).
+
+Each send is stored in `customer_messages` with its customer ID, dealership, verified staff identity, recipient, complete SMS body, attached media and provider acceptance state. The customer diary also receives the attempt. Repeating a request ID returns the existing attempt; concurrent requests cannot send it twice. Queued means accepted by Mobile Message, rather than delivered to a handset. Failed and unconfirmed sends remain visible; check the provider before repeating an unconfirmed send. Delivery receipt and inbound reply webhooks are not installed by this feature.
+
+Photos and videos are saved on the backend server's local disk. Set `MEDIA_STORAGE_DIR=storage/media` (the default); relative paths resolve from this backend directory. Uploads are ignored by Git. Use a persistent volume in production and include it in your backups. No AWS account, SDK or storage credentials are needed.
+
+Set `BACKEND_PUBLIC_URL=http://localhost:5001` for local development. Before sending customer links, replace it with the publicly reachable HTTPS URL of the backend server. Localhost links work only on the same computer. The backend serves each completed upload through an unguessable `/api/media/:token` URL, without a staff login. Only share media intended for the recipient; anyone with the link can open it. Links remain valid while the database record and local file exist.
+
+Supported formats are JPEG, PNG, WebP, GIF, HEIC/HEIF, MP4, MOV and WebM, up to 100 MB per file and five attachments per SMS. Authenticated uploads use 2 MB binary chunks through the same-origin frontend proxy. The backend bounds each chunk, checks customer/dealership access, verifies offsets and completed size, and atomically moves the staged upload to its final file. Retrying an identical chunk is safe; changed or overlapping chunks are rejected. Public downloads support byte ranges for video seeking. Only completed files are served; staging files are private.
+
+Vercel does not provide persistent local file storage, so media uploads are disabled when the backend runs on Vercel. Host the backend on a server or container with a persistent disk and point the frontend's server-only `API_URL` to that backend's `/api` URL. The frontend can remain on Vercel. See [Vercel's filesystem guidance](https://vercel.com/kb/guide/how-can-i-use-files-in-serverless-functions). Set `BACKEND_PUBLIC_URL` to the persistent backend's public origin as well. Do not use a temporary directory for customer media.
+
+Back up both the database and media directory together. Abandoned uploads remain under `staging/`; remove them only when no uploads are active. If a server process was killed while uploading, a `.lock` file can remain for that upload; clear abandoned locks while the server is stopped. Keep `files/` for as long as customer share links must work. Existing uploads from the former cloud implementation must be re-uploaded; this change does not copy remote files.
+
+For larger message libraries, create Mongo indexes on `customer_messages: { lead_id: 1, created_at: -1, _id: -1 }`, `message_media: { lead_id: 1, status: 1, created_at: -1, _id: -1 }`, and a unique sparse index on `message_media: { share_token: 1 }`. Mongo's built-in `_id` uniqueness already enforces send deduplication.
+
+Deploy this backend first, then the frontend. Verify with a test customer and a recipient number you control: send a text, upload a photo and video, send their links, reopen Customer360, and open the links without a staff session. Automated tests use a fake SMS provider and isolated temporary local storage; they do not send live SMS or upload customer data.
+
 ## Lists
 
 Leads, inventory, actions, appointments and feed logs return `pagination: { page, limit, total, totalPages }`. Pages and limits are bounded; limits are capped at 100. Sort fields are allowlisted and all paginated sorts include an `_id` tie breaker. Search strings are escaped as literal text. Appointment queries accept ISO `from`/`to` boundaries (exclusive end) and visit `type`; global feed logs support `status` and `search`.

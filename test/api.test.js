@@ -48,7 +48,7 @@ function fixtureDb(records) {
       },
       async findOne(query) { return rows.find((row) => matches(row, query)) || null; },
       async countDocuments(query) { return rows.filter((row) => matches(row, query)).length; },
-      async insertOne(document) { document._id ||= new ObjectId(); rows.push(document); return { insertedId: document._id }; },
+      async insertOne(document) { document._id ||= new ObjectId(); if (rows.some((row) => equal(row._id, document._id))) throw Object.assign(new Error('Duplicate ID'), { code: 11000 }); rows.push(document); return { insertedId: document._id }; },
       async deleteOne(query) { const i = rows.findIndex((row) => matches(row, query)); if (i >= 0) rows.splice(i, 1); },
       async findOneAndUpdate(query, update, options = {}) {
         let row = rows.find((item) => matches(item, query));
@@ -63,7 +63,7 @@ function fixtureDb(records) {
     };
   } };
 }
-async function api(t) {
+async function api(t, services = {}) {
   const user = { _id: new ObjectId(), email: 'southmorang@booran.com', name: 'South Morang Manager', role: 'manager', site: 'South Morang', active: true, passwordHash: await hashPassword('123456') };
   const token = 'a'.repeat(64);
   const records = {
@@ -81,7 +81,7 @@ async function api(t) {
     actionitems: [{ _id: new ObjectId(), rooftopName: 'South Morang Kia', status: 'open' }],
   };
   const hooks = {};
-  const app = createApp({ database: async (key) => {
+  const app = createApp({ ...services, database: async (key) => {
     const db = fixtureDb(records);
     return { command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
       const collection = db.collection(name);
@@ -98,7 +98,7 @@ async function api(t) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api${path}`, { ...options, headers: { cookie: `booran_session=${token}`, 'content-type': 'application/json', ...options.headers } });
     return { status: response.status, body: await response.json(), headers: response.headers };
   }
-  return { request, records, user, token, hooks };
+  return { request, records, user, token, hooks, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
 }
 test('HTTP login, session expiry and logout enforce authentication', async (t) => {
   const { request, records } = await api(t);
@@ -305,3 +305,132 @@ test('resolveRooftop correctly normalizes branch codes and filenames', () => {
   });
 });
 
+test('customer SMS saves links, server identity and diary, and cannot duplicate a send', async (t) => {
+  const providerCalls = [];
+  const sms = { ...require('../lib/mobilemessage'), configured: () => true, sendSms: async (payload) => { providerCalls.push(payload); return { status: 'queued', provider_message_id: 'provider-1' }; } };
+  const { request, records } = await api(t, { sms });
+  const lead = records.leads[0]; lead.customer_phone = '0412 345 678';
+  const media = { _id: new ObjectId(), lead_id: String(lead._id), dealership_name: lead.dealership_name, share_token: 'b'.repeat(64), status: 'ready', name: 'walkaround.mp4', content_type: 'video/mp4', size: 1000, created_at: new Date().toISOString() };
+  records.message_media = [media];
+  const path = `/leads/${lead._id}/messages`;
+  const payload = { body: 'Your vehicle walkaround', media_ids: [String(media._id)], request_id: '12345678-1234-1234-1234-123456789abc', author: 'Forged' };
+  const options = { method: 'POST', body: JSON.stringify(payload) };
+  const result = await request(path, options);
+  assert.equal(result.status, 201);
+  assert.equal(result.body.data.status, 'queued');
+  assert.equal(result.body.data.author, 'South Morang Manager');
+  assert.equal(records.customer_messages[0].user_id, String(records.users[0]._id));
+  assert.equal(result.body.data.phone, '+61412345678');
+  assert.match(result.body.data.body, /Your vehicle walkaround\nhttps?:.*\/api\/media\/b{64}/);
+  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls[0].body, result.body.data.body);
+  assert.equal(lead.diary_entries.length, 1);
+  const repeated = await request(path, options);
+  assert.equal(repeated.body.data.id, result.body.data.id);
+  assert.equal(providerCalls.length, 1);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ ...payload, body: 'Changed' }) })).status, 409);
+  const history = await request(path);
+  assert.equal(history.body.data.messages.length, 1);
+  assert.equal(history.body.pagination.total, 1);
+  assert.equal(history.body.data.messages[0].fingerprint, undefined);
+  assert.equal(history.body.data.messages[0].provider_message_id, undefined);
+});
+
+test('messages and media enforce customer/location access and cannot attach another customer’s media', async (t) => {
+  let calls = 0;
+  const sms = { ...require('../lib/mobilemessage'), configured: () => true, sendSms: async () => { ++calls; return { status: 'queued' }; } };
+  const { request, records } = await api(t, { sms });
+  const [lead, other, forbidden] = records.leads;
+  lead.customer_phone = '0412345678';
+  const media = { _id: new ObjectId(), lead_id: String(other._id), dealership_name: other.dealership_name, status: 'ready' };
+  records.message_media = [media];
+  const payload = { body: 'Hello', request_id: '12345678-1234-1234-1234-123456789abc', media_ids: [String(media._id)] };
+  assert.equal((await request(`/leads/${lead._id}/messages`, { headers: { cookie: '' } })).status, 401);
+  for (const endpoint of ['messages', 'media']) {
+    assert.equal((await request(`/leads/${forbidden._id}/${endpoint}`)).status, 404);
+    assert.equal((await request(`/leads/${forbidden._id}/${endpoint}`, { method: 'POST', body: JSON.stringify(payload) })).status, 404);
+  }
+  assert.equal((await request(`/leads/${lead._id}/messages`, { method: 'POST', body: JSON.stringify(payload) })).status, 400);
+  assert.equal((await request(`/leads/${lead._id}/media/${media._id}/complete`, { method: 'POST', body: '{}' })).status, 404);
+  assert.equal((await request(`/leads/${lead._id}/media`)).body.data.length, 0);
+  assert.equal(calls, 0);
+});
+
+test('failed and indeterminate provider responses remain in customer history without a false success', async (t) => {
+  let calls = 0;
+  const sms = { ...require('../lib/mobilemessage'), configured: () => true, sendSms: async () => ({ status: ++calls === 1 ? 'failed' : 'unknown', error: 'Fixture provider failure' }) };
+  const { request, records } = await api(t, { sms });
+  const lead = records.leads[0]; lead.customer_phone = '0412345678';
+  const path = `/leads/${lead._id}/messages`;
+  for (const [n, status] of [[1, 'failed'], [2, 'unknown']]) {
+    const payload = { body: 'Hello', request_id: `12345678-1234-1234-1234-123456789ab${n}` };
+    assert.equal((await request(path, { method: 'POST', body: JSON.stringify(payload) })).body.data.status, status);
+    assert.equal((await request(path, { method: 'POST', body: JSON.stringify(payload) })).body.data.status, status);
+  }
+  assert.equal(calls, 2);
+  assert.equal((await request(path)).body.pagination.total, 2);
+  assert.equal(lead.diary_entries.length, 2);
+});
+
+test('pending send reservations prevent simultaneous customer requests from sending twice', async (t) => {
+  let resolveSend, started;
+  const start = new Promise((resolve) => { started = resolve; });
+  let calls = 0;
+  const sms = { ...require('../lib/mobilemessage'), configured: () => true, sendSms: async () => { ++calls; started(); return new Promise((resolve) => { resolveSend = resolve; }); } };
+  const { request, records } = await api(t, { sms });
+  const lead = records.leads[0]; lead.customer_phone = '0412345678';
+  const path = `/leads/${lead._id}/messages`;
+  const options = { method: 'POST', body: JSON.stringify({ body: 'Hello', request_id: '12345678-1234-1234-1234-123456789abc' }) };
+  const first = request(path, options);
+  await start;
+  const duplicate = await request(path, options);
+  assert.equal(duplicate.body.data.status, 'pending');
+  resolveSend({ status: 'queued', provider_message_id: 'provider-1' });
+  assert.equal((await first).body.data.status, 'queued');
+  assert.equal(calls, 1);
+});
+
+test('media shares become public only after completion and do not expose storage metadata', async (t) => {
+  const fs = require('node:fs/promises');
+  const path = require('node:path');
+  const root = require('node:os').tmpdir();
+  const directory = await fs.mkdtemp(path.join(root, 'salesfloor-media-http-'));
+  t.after(async () => { assert.ok(path.resolve(directory).startsWith(path.resolve(root) + path.sep)); await fs.rm(directory, { recursive: true, force: true }); });
+  const storage = require('../lib/media-storage').createLocalStorage({ directory, serverless: false });
+  const { request, records, baseUrl } = await api(t, { storage });
+  const lead = records.leads[0];
+  const created = await request(`/leads/${lead._id}/media`, { method: 'POST', body: JSON.stringify({ name: 'photo.jpg', content_type: 'image/jpeg', size: 100 }) });
+  assert.equal(created.status, 201);
+  const media = records.message_media[0];
+  assert.equal(media.dealership_name, lead.dealership_name);
+  assert.equal((await request(`/leads/${lead._id}/media`)).body.data.length, 0);
+  const url = `${baseUrl}/media/${media.share_token}`;
+  assert.equal((await fetch(url)).status, 404);
+  const contentPath = `/leads/${lead._id}/media/${created.body.data.id}/content?offset=0`;
+  const bytes = Buffer.alloc(100, 255);
+  assert.equal((await request(contentPath, { method: 'PUT', body: bytes, headers: { 'content-type': 'application/octet-stream', cookie: '' } })).status, 401);
+  assert.equal((await request(contentPath.replace(String(lead._id), String(records.leads[2]._id)), { method: 'PUT', body: bytes, headers: { 'content-type': 'application/octet-stream' } })).status, 404);
+  assert.equal((await request(contentPath, { method: 'PUT', body: bytes, headers: { 'content-type': 'text/plain' } })).status, 415);
+  const saved = await request(contentPath, { method: 'PUT', body: bytes, headers: { 'content-type': 'application/octet-stream' } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.data.next_offset, 100);
+  const finished = await request(`/leads/${lead._id}/media/${created.body.data.id}/complete`, { method: 'POST', body: '{}' });
+  assert.equal(finished.status, 200);
+  assert.match(finished.body.data.url, /\/api\/media\/[a-f0-9]{64}$/);
+  assert.equal(finished.body.data.storage_key, undefined);
+  assert.equal(finished.body.data.staging_key, undefined);
+  assert.equal((await request(`/leads/${lead._id}/media`)).body.data.length, 1);
+  assert.equal((await request(`/leads/${lead._id}/media/${created.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 200);
+  const publicRead = await fetch(url);
+  assert.equal(publicRead.status, 200);
+  assert.equal(publicRead.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(Buffer.from(await publicRead.arrayBuffer()), bytes);
+  assert.equal(publicRead.headers.get('x-content-type-options'), 'nosniff');
+  const range = await fetch(url, { headers: { Range: 'bytes=10-19' } });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get('content-range'), 'bytes 10-19/100');
+  assert.equal((await range.arrayBuffer()).byteLength, 10);
+  assert.equal((await request(contentPath, { method: 'PUT', body: bytes, headers: { 'content-type': 'application/octet-stream' } })).status, 404);
+  media.status = 'uploading';
+  assert.equal((await fetch(url)).status, 404);
+});

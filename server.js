@@ -12,6 +12,9 @@ const { scopedDatabase } = require('./lib/access');
 const { installAuth } = require('./lib/auth');
 const { invalid, dealership, serializeLead, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
 const { changeHold, serializeVehicle } = require('./lib/vehicle-holds');
+const { installPublicMedia, installCustomerMessages } = require('./lib/customer-messages');
+const mobileMessage = require('./lib/mobilemessage');
+const mediaStorage = require('./lib/media-storage');
 
 
 require('dotenv').config();
@@ -33,7 +36,7 @@ async function database(envKey) {
   return connections.get(envKey);
 }
 
-function createApp({ database: resolveDatabase = database } = {}) {
+function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage = mediaStorage } = {}) {
 const app = express();
 
 // CORS setup for production (Vercel & Custom Domains)
@@ -58,6 +61,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => {
   if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
+    if (req.method === 'PUT' && /^\/(api\/)?leads\/[^/]+\/media\/[^/]+\/content$/.test(req.path)) return next();
     if (req.body === undefined && !req.headers['content-length'] && !req.headers['transfer-encoding']) req.body = {};
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({ success: false, error: 'The request body must be a JSON object.' });
   }
@@ -111,7 +115,9 @@ router.get('/health', async (req, res) => {
 
 // ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
 
+installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
+installCustomerMessages(router, getFlwupDb, sms, storage);
 
 router.get('/leads', async (req, res) => {
   try {
