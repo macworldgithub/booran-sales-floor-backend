@@ -1,3 +1,9 @@
+const dns = require('dns');
+if (typeof dns.setServers === 'function') {
+  try {
+    dns.setServers(['8.8.8.8', '1.1.1.1']);
+  } catch (_) {}
+}
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
@@ -454,6 +460,18 @@ router.get('/inventory/feed-logs', async (req, res) => {
   }
 });
 
+router.post('/inventory/sync-csv', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ success: false, error: 'Super admin access is required.' });
+  try {
+    const { syncCsvData } = require('./scripts/ingest-csv');
+    const result = await syncCsvData();
+    res.json({ success: true, message: 'CSV data synchronized successfully.', data: result });
+  } catch (error) {
+    console.error('CSV sync error:', error);
+    res.status(500).json({ success: false, error: 'Failed to synchronize CSV data.' });
+  }
+});
+
 router.get('/inventory/stats', async (req, res) => {
   try {
     const db = await getBooranDb(req);
@@ -684,11 +702,23 @@ const app = createApp();
 // Start server if run directly (local development)
 if (!process.env.VERCEL) {
   if (require.main === module) {
-    app.listen(process.env.PORT || 5001, () => {
+    const port = process.env.PORT || 5001;
+    app.listen(port, () => {
       console.log(`=======================================================`);
-      console.log(`Booran Motors Sales Floor API running on port ${process.env.PORT || 5001}`);
-      console.log(`Health endpoint: http://localhost:${process.env.PORT || 5001}/api/health`);
+      console.log(`Booran Motors Sales Floor API running on port ${port}`);
+      console.log(`Health endpoint: http://localhost:${port}/api/health`);
       console.log(`=======================================================`);
+
+      if (process.env.AUTO_SYNC_CSV !== 'false') {
+        const { syncCsvData, startCsvWatcher } = require('./scripts/ingest-csv');
+        syncCsvData()
+          .then((res) => console.log(`📦 Auto-sync CSV complete: ${res.inserted || 0} inserted, ${res.updated || 0} updated.`))
+          .catch((err) => console.warn('⚠️ Auto-sync CSV skipped/failed:', err.message));
+
+        if (process.env.WATCH_CSV !== 'false') {
+          startCsvWatcher();
+        }
+      }
     });
   }
 }

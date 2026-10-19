@@ -9,7 +9,10 @@
     "test": "node --test",
     "check": "node --check server.js",
     "seed:accounts": "node scripts/seed-accounts.js",
-    "migrate:state": "node scripts/migrate-app-state.js"
+    "migrate:state": "node scripts/migrate-app-state.js",
+    "ingest:csv": "node scripts/ingest-csv.js",
+    "sync:inventory": "node scripts/ingest-csv.js",
+    "sync:watch": "node scripts/ingest-csv.js --watch"
   },
   "repository": {
     "type": "git",

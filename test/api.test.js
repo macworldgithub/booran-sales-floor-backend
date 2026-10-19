@@ -280,3 +280,28 @@ test('Mongo date values in lead diary entries are preserved in API responses', (
   const result = serializeLead({ _id: new ObjectId(), diary_entries: [{ author: 'Manager', note: 'Called', date }] });
   assert.equal(result.diary_entries[0].date, date.toISOString());
 });
+
+test('HTTP CSV sync endpoint enforces super admin role', async (t) => {
+  const { request, user } = await api(t);
+  // Default user is manager -> 403
+  const managerRes = await request('/inventory/sync-csv', { method: 'POST' });
+  assert.equal(managerRes.status, 403);
+  assert.equal(managerRes.body.success, false);
+});
+
+test('resolveRooftop correctly normalizes branch codes and filenames', () => {
+  const { resolveRooftop } = require('../scripts/ingest-csv');
+  assert.deepEqual(resolveRooftop('40', 'SouthMorangHyundai'), {
+    rooftopId: 'southmoranghyundai',
+    rooftopName: 'South Morang Hyundai',
+    branchCode: '40',
+    clusterId: 'cluster-hyundai-metro',
+  });
+  assert.deepEqual(resolveRooftop('70', 'SouthMorangKIA'), {
+    rooftopId: 'southmorangkia',
+    rooftopName: 'South Morang Kia',
+    branchCode: '70',
+    clusterId: 'cluster-hyundai-metro',
+  });
+});
+
