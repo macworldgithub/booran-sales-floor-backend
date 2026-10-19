@@ -451,45 +451,35 @@ test('queued Sales Floor messages refresh from Mobile Message and persist delive
   assert.equal(lookups, 1);
 });
 
-test('customer history merges platform threads by normalised phone, deduplicates and scopes by dealership', async (t) => {
-  const delivery = { messages: [
-    { _id: 'del-1', phone: '0412 345 678', site: 'South Morang', body: 'Delivery update', status: 'delivered', provider_message_id: 'shared-id', sent_at: '2026-10-18T10:00:00Z' },
-    { _id: 'del-2', phone: '+61412345678', site: 'Melbourne City', body: 'Other location private message', status: 'delivered', sent_at: '2026-10-18T11:00:00Z' },
-    { _id: 'del-3', phone: '61412345678', client_id: 'client-1', body: 'Linked site message', status: 'received', direction: 'inbound', sent_at: '2026-10-18T12:00:00Z' },
-    { _id: 'del-4', phone: '+61412345678', body: 'Ambiguous site message', status: 'sent', sent_at: '2026-10-18T13:00:00Z' },
-  ], clients: [{ _id: 'c1', id: 'client-1', phone: '0412345678', site_location: 'BYD South Morang' }] };
-  const legacy = { conversations: [{ _id: 'thread-1', phone: '(04)1234-5678', dealer: 'BYD South Morang', messages: [
-    { id: 'shared-id', sender: 'agent', text: 'Delivery update', status: 'queued', createdAt: '2026-10-18T10:00:00Z' },
-    { id: 'reply-1', sender: 'user', text: 'Thanks', createdAt: '2026-10-18T14:00:00Z' },
-    { id: 'system-1', sender: 'system', text: 'Internal routing information' },
-  ] }, { _id: 'thread-2', phone: '+61412345678', dealer: 'Melbourne City', messages: [{ id: 'forbidden-1', sender: 'user', text: 'Private', createdAt: '2026-10-18T15:00:00Z' }] }] };
-  const { request, records, user } = await api(t, { historySources: { delivery: async () => fixtureDb(delivery), leadCentre: async () => fixtureDb(legacy) } });
+test('customer history includes only Sales Floor messages even when other platform data exists', async (t) => {
+  let otherPlatformQueried = false;
+  const { request, records, user } = await api(t, { historySources: { delivery: async () => { otherPlatformQueried = true; throw new Error('Must not be read'); }, leadCentre: async () => { otherPlatformQueried = true; throw new Error('Must not be read'); } } });
   const lead = records.leads[0]; lead.customer_phone = '+61412345678';
-  let result = await request(`/leads/${lead._id}/messages`);
-  assert.deepEqual(result.body.data.messages.map((row) => row.body), ['Thanks', 'Linked site message', 'Delivery update']);
-  assert.equal(result.body.data.messages[0].direction, 'inbound');
-  assert.equal(result.body.data.messages[0].status, 'received');
-  assert.equal(result.body.data.messages[0].source, 'Lead Centre');
-  assert.equal(result.body.data.messages[2].status, 'delivered');
-  assert.equal(result.body.pagination.total, 3);
-  assert.equal(result.body.data.messages[0].saveReceipt, undefined);
-  user.role = 'super_admin';
-  result = await request(`/leads/${lead._id}/messages`);
-  assert.equal(result.body.pagination.total, 6);
-  assert.ok(result.body.data.messages.some((row) => row.body === 'Other location private message'));
+  records.customer_messages = [{ _id: 'salesfloor-1', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', body: 'Booran text', status: 'delivered' }];
+  records.messages = [{ _id: 'delivery-1', phone: '+61412345678', body: 'Delivery Centre text', status: 'delivered', site: lead.dealership_name }];
+  records.conversations = [{ _id: 'thread-1', phone: '+61412345678', dealer: lead.dealership_name, messages: [{ id: 'legacy-1', text: 'Lead Centre text', sender: 'user' }] }];
+  for (const role of ['manager', 'super_admin']) {
+    user.role = role;
+    const result = await request('/leads/' + lead._id + '/messages');
+    assert.deepEqual(result.body.data.messages.map(row => row.body), ['Booran text']);
+    assert.equal(result.body.data.messages[0].source, 'Sales Floor');
+    assert.equal(result.body.pagination.total, 1);
+  }
+  assert.equal(otherPlatformQueried, false);
 });
 
-test('history failure preserves local messages and shows an explicit warning', async (t) => {
-  const { request, records } = await api(t, { historySources: { delivery: async () => { throw new Error('Connection unavailable'); } } });
+test('provider lookup failure preserves saved Sales Floor messages and the last known status', async (t) => {
+  const { request, records } = await api(t, { sms: { configured: () => true, lookupMessage: async () => { throw new Error('Provider unavailable'); } } });
   const lead = records.leads[0]; lead.customer_phone = '0412345678';
   records.customer_messages = [{ _id: 'local-1', lead_id: String(lead._id), dealership_name: lead.dealership_name, body: 'Saved locally', phone: '+61412345678', status: 'queued' }];
-  const result = await request(`/leads/${lead._id}/messages`);
+  const result = await request('/leads/' + lead._id + '/messages');
   assert.equal(result.status, 200);
   assert.equal(result.body.data.messages[0].body, 'Saved locally');
-  assert.match(result.body.data.history_warning, /Delivery Centre history is temporarily unavailable/);
+  assert.equal(result.body.data.messages[0].status, 'queued');
+  assert.match(result.body.data.history_warning, /Delivery status could not be refreshed/);
 });
 
-test('shared history pagination includes older threads and same-phone prior lead records', async (t) => {
+test('Sales Floor history pagination retains older app messages and same-phone prior lead records', async (t) => {
   const { request, records } = await api(t);
   const lead = records.leads[0]; lead.customer_phone = '0412345678';
   records.customer_messages = Array.from({ length: 25 }, (_, index) => ({ _id: `message-${index}`, lead_id: 'prior-lead-record', dealership_name: lead.dealership_name, phone: index % 2 ? '0412 345 678' : '+61412345678', body: `Text ${index}`, status: 'delivered', created_at: new Date(Date.UTC(2026, 9, 1, index)).toISOString() }));
@@ -499,4 +489,58 @@ test('shared history pagination includes older threads and same-phone prior lead
   assert.equal(first.body.data.messages.length, 20);
   assert.equal(older.body.data.messages.length, 5);
   assert.equal(older.body.data.messages[4].body, 'Text 0');
+});
+
+test('lead numbers can be added, edited and cleared without changing historic SMS recipients', async (t) => {
+  const { request, records } = await api(t);
+  const lead = records.leads[0];
+  let result = await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '0412 345 678' }) });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.data.phone, '+61412345678');
+  records.customer_messages = [{ _id: 'before-phone-edit', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', body: 'Historical SMS', status: 'delivered' }];
+  result = await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '+61 499 918 523' }) });
+  assert.equal(result.body.data.phone, '+61499918523');
+  const history = await request(`/leads/${lead._id}/messages`);
+  assert.equal(history.body.data.messages[0].phone, '+61412345678');
+  assert.equal((await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: 'not-a-number' }) })).status, 400);
+  assert.equal(lead.customer_phone, '+61499918523');
+  assert.equal((await request(`/leads/${records.leads[2]._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '0412345678' }) })).status, 404);
+  result = await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '' }) });
+  assert.equal(result.body.data.phone, '');
+});
+
+test('MongoDB media uploads produce a real viewer and bounded binary photo/video ranges', async (t) => {
+  const { createMediaStorage } = require('../lib/mongo-media-storage');
+  const chunks = {};
+  const storage = createMediaStorage(async () => fixtureDb(chunks), 'mongodb');
+  const { request, records, baseUrl } = await api(t, { storage });
+  const lead = records.leads[0];
+  const length = 2 * 1024 * 1024;
+  const bytes = Buffer.alloc(length + 10, 255); bytes[0] = 0; bytes[length + 9] = 128;
+  const prepared = await request(`/leads/${lead._id}/media`, { method: 'POST', body: JSON.stringify({ name: 'vehicle.mp4', content_type: 'video/mp4', size: bytes.length }) });
+  assert.equal(prepared.status, 201);
+  assert.equal(records.message_media[0].storage_backend, 'mongodb');
+  const contentPath = `/leads/${lead._id}/media/${prepared.body.data.id}/content`;
+  const url = `${baseUrl}/media/${records.message_media[0].share_token}`;
+  assert.equal((await fetch(url)).status, 404);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: Buffer.alloc(length, 0), headers: { 'content-type': 'application/octet-stream' } })).status, 409);
+  assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 400);
+  assert.equal((await request(contentPath + `?offset=${length}`, { method: 'PUT', body: bytes.subarray(length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 200);
+  const viewer = await fetch(url);
+  assert.equal(viewer.status, 200);
+  const html = await viewer.text();
+  assert.match(html, /<video controls/);
+  assert.match(html, /Booran Sales Floor/);
+  assert.ok(viewer.headers.get('content-security-policy').includes('frame-ancestors'));
+  const binary = await fetch(url + '/content');
+  assert.equal(binary.status, 206);
+  assert.equal((await binary.arrayBuffer()).byteLength, length);
+  const range = await fetch(url + '/content', { headers: { Range: `bytes=${length - 2}-${length + 9}` } });
+  assert.equal(range.status, 206);
+  assert.deepEqual(Buffer.from(await range.arrayBuffer()), bytes.subarray(length - 2));
+  assert.equal((await fetch(url + '/content', { headers: { Range: `bytes=${bytes.length}-` } })).status, 416);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 404);
 });

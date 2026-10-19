@@ -14,7 +14,7 @@ const { invalid, dealership, serializeLead, createLead, leadUpdate, actionUpdate
 const { changeHold, serializeVehicle } = require('./lib/vehicle-holds');
 const { installPublicMedia, installCustomerMessages } = require('./lib/customer-messages');
 const mobileMessage = require('./lib/mobilemessage');
-const mediaStorage = require('./lib/media-storage');
+const { createMediaStorage } = require('./lib/mongo-media-storage');
 
 
 require('dotenv').config();
@@ -23,12 +23,10 @@ require('dotenv').config();
 const connections = new Map();
 async function database(envKey) {
   if (!connections.has(envKey)) {
-    const sharedHistoryName = ({ MONGODB_URI_DELIVERY: process.env.DELIVERY_DB_NAME || 'byd-panel', MONGODB_URI_LEAD_CENTRE: process.env.LEAD_CENTRE_DB_NAME || 'byd-leads-new' })[envKey];
-    const uri = process.env[envKey] || (sharedHistoryName ? process.env.MONGODB_URI_FLWUP : undefined);
+    const uri = process.env[envKey];
     if (!uri) throw new Error(`${envKey} is not configured`);
     const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000 });
-    const databaseName = envKey === 'MONGODB_URI_DELIVERY' ? process.env.DELIVERY_DB_NAME : envKey === 'MONGODB_URI_LEAD_CENTRE' ? process.env.LEAD_CENTRE_DB_NAME : undefined;
-    const pending = client.connect().then(() => client.db(databaseName || (!process.env[envKey] ? sharedHistoryName : undefined))).catch(async (error) => {
+    const pending = client.connect().then(() => client.db()).catch(async (error) => {
       connections.delete(envKey);
       await client.close().catch(() => {});
       throw error;
@@ -38,8 +36,9 @@ async function database(envKey) {
   return connections.get(envKey);
 }
 
-function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage = mediaStorage, historySources } = {}) {
+function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage } = {}) {
 const app = express();
+const storage = providedStorage || createMediaStorage(() => resolveDatabase('MONGODB_URI_FLWUP'));
 
 // CORS setup for production (Vercel & Custom Domains)
 app.use(
@@ -119,10 +118,7 @@ router.get('/health', async (req, res) => {
 
 installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
-installCustomerMessages(router, getFlwupDb, sms, storage, historySources || {
-  delivery: () => resolveDatabase('MONGODB_URI_DELIVERY'),
-  leadCentre: () => resolveDatabase('MONGODB_URI_LEAD_CENTRE'),
-});
+installCustomerMessages(router, getFlwupDb, sms, storage);
 
 router.get('/leads', async (req, res) => {
   try {
