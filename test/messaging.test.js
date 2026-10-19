@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { normalisePhone, validateSmsLength, sendSms } = require('../lib/mobilemessage');
+const { normalisePhone, validateSmsLength, sendSms, lookupMessage } = require('../lib/mobilemessage');
 const { validateMedia, createLocalStorage } = require('../lib/media-storage');
 const fs = require('node:fs/promises');
 const { tmpdir } = require('node:os');
@@ -95,6 +95,32 @@ test('Mobile Message uses configured sender, Unicode, Basic auth and stable idem
     let called = false;
     assert.equal((await sendSms(payload, async () => { called = true; })).status, 'failed');
     assert.equal(called, false);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('delivery lookup uses the documented GET endpoint and validates the provider message and recipient', async () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, { MOBILEMESSAGE_USERNAME: 'fixture', MOBILEMESSAGE_PASSWORD: 'fixture-secret', MOBILEMESSAGE_SENDER_ID: 'Fixture' });
+  try {
+    let request;
+    const payload = { messageId: 'provider-123', phone: '+61412345678' };
+    const fetcher = (rows) => async (url, options) => { request = { url, options }; return { ok: true, json: async () => ({ status: 'complete', results: rows }) }; };
+    const result = await lookupMessage(payload, fetcher([{ message_id: 'provider-123', to: '61412345678', status: 'delivered' }]));
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.error, null);
+    assert.equal(request.url.searchParams.get('message_id'), 'provider-123');
+    assert.equal(request.options.method, undefined);
+    assert.equal(request.options.cache, 'no-store');
+    assert.equal(await lookupMessage(payload, fetcher([{ message_id: 'other-id', to: '61412345678', status: 'delivered' }])), null);
+    assert.equal(await lookupMessage(payload, fetcher([{ message_id: 'provider-123', to: '61499999999', status: 'delivered' }])), null);
+    assert.equal(await lookupMessage(payload, fetcher([{ message_id: 'provider-123', to: '61412345678', status: 'unsupported' }])), null);
+    await lookupMessage({ customRef: 'known-attempt', phone: payload.phone }, fetcher([]));
+    assert.equal(request.url.searchParams.get('custom_ref'), 'known-attempt');
+    assert.equal(request.url.searchParams.has('message_id'), false);
+    await assert.rejects(lookupMessage(payload, async () => ({ ok: false })), /temporarily unavailable/);
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);

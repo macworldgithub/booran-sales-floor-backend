@@ -23,10 +23,12 @@ require('dotenv').config();
 const connections = new Map();
 async function database(envKey) {
   if (!connections.has(envKey)) {
-    const uri = process.env[envKey];
+    const sharedHistoryName = ({ MONGODB_URI_DELIVERY: process.env.DELIVERY_DB_NAME || 'byd-panel', MONGODB_URI_LEAD_CENTRE: process.env.LEAD_CENTRE_DB_NAME || 'byd-leads-new' })[envKey];
+    const uri = process.env[envKey] || (sharedHistoryName ? process.env.MONGODB_URI_FLWUP : undefined);
     if (!uri) throw new Error(`${envKey} is not configured`);
     const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000 });
-    const pending = client.connect().then(() => client.db()).catch(async (error) => {
+    const databaseName = envKey === 'MONGODB_URI_DELIVERY' ? process.env.DELIVERY_DB_NAME : envKey === 'MONGODB_URI_LEAD_CENTRE' ? process.env.LEAD_CENTRE_DB_NAME : undefined;
+    const pending = client.connect().then(() => client.db(databaseName || (!process.env[envKey] ? sharedHistoryName : undefined))).catch(async (error) => {
       connections.delete(envKey);
       await client.close().catch(() => {});
       throw error;
@@ -36,7 +38,7 @@ async function database(envKey) {
   return connections.get(envKey);
 }
 
-function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage = mediaStorage } = {}) {
+function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage = mediaStorage, historySources } = {}) {
 const app = express();
 
 // CORS setup for production (Vercel & Custom Domains)
@@ -117,7 +119,10 @@ router.get('/health', async (req, res) => {
 
 installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
-installCustomerMessages(router, getFlwupDb, sms, storage);
+installCustomerMessages(router, getFlwupDb, sms, storage, historySources || {
+  delivery: () => resolveDatabase('MONGODB_URI_DELIVERY'),
+  leadCentre: () => resolveDatabase('MONGODB_URI_LEAD_CENTRE'),
+});
 
 router.get('/leads', async (req, res) => {
   try {

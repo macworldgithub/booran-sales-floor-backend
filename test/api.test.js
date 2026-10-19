@@ -81,7 +81,7 @@ async function api(t, services = {}) {
     actionitems: [{ _id: new ObjectId(), rooftopName: 'South Morang Kia', status: 'open' }],
   };
   const hooks = {};
-  const app = createApp({ ...services, database: async (key) => {
+  const app = createApp({ historySources: {}, ...services, sms: { ...require('../lib/mobilemessage'), ...services.sms, lookupMessage: services.sms?.lookupMessage || (async () => null) }, database: async (key) => {
     const db = fixtureDb(records);
     return { command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
       const collection = db.collection(name);
@@ -433,4 +433,70 @@ test('media shares become public only after completion and do not expose storage
   assert.equal((await request(contentPath, { method: 'PUT', body: bytes, headers: { 'content-type': 'application/octet-stream' } })).status, 404);
   media.status = 'uploading';
   assert.equal((await fetch(url)).status, 404);
+});
+
+test('queued Sales Floor messages refresh from Mobile Message and persist delivered status', async (t) => {
+  let lookups = 0;
+  const sms = { configured: () => true, lookupMessage: async ({ messageId, phone }) => {
+    lookups++; assert.equal(messageId, 'provider-existing'); assert.equal(phone, '+61412345678');
+    return { status: 'delivered', provider_message_id: messageId, error: null };
+  } };
+  const { request, records } = await api(t, { sms });
+  const lead = records.leads[0]; lead.customer_phone = '0412345678';
+  records.customer_messages = [{ _id: 'message-existing', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', status: 'queued', body: 'Test', provider_message_id: 'provider-existing', created_at: '2026-10-19T01:00:00Z' }];
+  const result = await request(`/leads/${lead._id}/messages`);
+  assert.equal(result.body.data.messages[0].status, 'delivered');
+  assert.equal(records.customer_messages[0].status, 'delivered');
+  await request(`/leads/${lead._id}/messages`);
+  assert.equal(lookups, 1);
+});
+
+test('customer history merges platform threads by normalised phone, deduplicates and scopes by dealership', async (t) => {
+  const delivery = { messages: [
+    { _id: 'del-1', phone: '0412 345 678', site: 'South Morang', body: 'Delivery update', status: 'delivered', provider_message_id: 'shared-id', sent_at: '2026-10-18T10:00:00Z' },
+    { _id: 'del-2', phone: '+61412345678', site: 'Melbourne City', body: 'Other location private message', status: 'delivered', sent_at: '2026-10-18T11:00:00Z' },
+    { _id: 'del-3', phone: '61412345678', client_id: 'client-1', body: 'Linked site message', status: 'received', direction: 'inbound', sent_at: '2026-10-18T12:00:00Z' },
+    { _id: 'del-4', phone: '+61412345678', body: 'Ambiguous site message', status: 'sent', sent_at: '2026-10-18T13:00:00Z' },
+  ], clients: [{ _id: 'c1', id: 'client-1', phone: '0412345678', site_location: 'BYD South Morang' }] };
+  const legacy = { conversations: [{ _id: 'thread-1', phone: '(04)1234-5678', dealer: 'BYD South Morang', messages: [
+    { id: 'shared-id', sender: 'agent', text: 'Delivery update', status: 'queued', createdAt: '2026-10-18T10:00:00Z' },
+    { id: 'reply-1', sender: 'user', text: 'Thanks', createdAt: '2026-10-18T14:00:00Z' },
+    { id: 'system-1', sender: 'system', text: 'Internal routing information' },
+  ] }, { _id: 'thread-2', phone: '+61412345678', dealer: 'Melbourne City', messages: [{ id: 'forbidden-1', sender: 'user', text: 'Private', createdAt: '2026-10-18T15:00:00Z' }] }] };
+  const { request, records, user } = await api(t, { historySources: { delivery: async () => fixtureDb(delivery), leadCentre: async () => fixtureDb(legacy) } });
+  const lead = records.leads[0]; lead.customer_phone = '+61412345678';
+  let result = await request(`/leads/${lead._id}/messages`);
+  assert.deepEqual(result.body.data.messages.map((row) => row.body), ['Thanks', 'Linked site message', 'Delivery update']);
+  assert.equal(result.body.data.messages[0].direction, 'inbound');
+  assert.equal(result.body.data.messages[0].status, 'received');
+  assert.equal(result.body.data.messages[0].source, 'Lead Centre');
+  assert.equal(result.body.data.messages[2].status, 'delivered');
+  assert.equal(result.body.pagination.total, 3);
+  assert.equal(result.body.data.messages[0].saveReceipt, undefined);
+  user.role = 'super_admin';
+  result = await request(`/leads/${lead._id}/messages`);
+  assert.equal(result.body.pagination.total, 6);
+  assert.ok(result.body.data.messages.some((row) => row.body === 'Other location private message'));
+});
+
+test('history failure preserves local messages and shows an explicit warning', async (t) => {
+  const { request, records } = await api(t, { historySources: { delivery: async () => { throw new Error('Connection unavailable'); } } });
+  const lead = records.leads[0]; lead.customer_phone = '0412345678';
+  records.customer_messages = [{ _id: 'local-1', lead_id: String(lead._id), dealership_name: lead.dealership_name, body: 'Saved locally', phone: '+61412345678', status: 'queued' }];
+  const result = await request(`/leads/${lead._id}/messages`);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.data.messages[0].body, 'Saved locally');
+  assert.match(result.body.data.history_warning, /Delivery Centre history is temporarily unavailable/);
+});
+
+test('shared history pagination includes older threads and same-phone prior lead records', async (t) => {
+  const { request, records } = await api(t);
+  const lead = records.leads[0]; lead.customer_phone = '0412345678';
+  records.customer_messages = Array.from({ length: 25 }, (_, index) => ({ _id: `message-${index}`, lead_id: 'prior-lead-record', dealership_name: lead.dealership_name, phone: index % 2 ? '0412 345 678' : '+61412345678', body: `Text ${index}`, status: 'delivered', created_at: new Date(Date.UTC(2026, 9, 1, index)).toISOString() }));
+  const first = await request(`/leads/${lead._id}/messages`);
+  const older = await request(`/leads/${lead._id}/messages?page=2`);
+  assert.equal(first.body.pagination.total, 25);
+  assert.equal(first.body.data.messages.length, 20);
+  assert.equal(older.body.data.messages.length, 5);
+  assert.equal(older.body.data.messages[4].body, 'Text 0');
 });
