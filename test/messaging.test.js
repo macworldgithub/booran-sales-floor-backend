@@ -1,6 +1,24 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { normalisePhone, validateSmsLength, sendSms, lookupMessage } = require('../lib/mobilemessage');
+const { normalisePhone, validateSmsLength, sendSms, lookupMessage, listInbound } = require('../lib/mobilemessage');
+
+test('inbox reads use provider Basic auth, date and offset without consuming messages', async () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, { MOBILEMESSAGE_USERNAME: 'fixture', MOBILEMESSAGE_PASSWORD: 'secret', MOBILEMESSAGE_SENDER_ID: 'Fixture' });
+  try {
+    let request;
+    const page = { status: 'complete', results: [{ message_id: 'in-1' }], total: 201 };
+    assert.deepEqual(await listInbound({ from: '2026-10-01', offset: 200 }, async (url, options) => { request = { url, options }; return { ok: true, json: async () => page }; }), { results: page.results, total: 201 });
+    assert.equal(request.url.pathname, '/v1/inbound');
+    assert.equal(request.url.searchParams.get('offset'), '200');
+    assert.equal(request.url.searchParams.get('limit'), '200');
+    assert.equal(request.url.searchParams.get('from'), '2026-10-01');
+    assert.equal(request.options.headers.Authorization, `Basic ${Buffer.from('fixture:secret').toString('base64')}`);
+    assert.equal(request.options.method, undefined);
+    await assert.rejects(listInbound({ from: '2026-10-01' }, async () => ({ ok: false })), /Incoming SMS/);
+    await assert.rejects(listInbound({ from: '2026-10-01' }, async () => ({ ok: true, json: async () => ({ results: [] }) })), /Incoming SMS/);
+  } finally { for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); }
+});
 const { validateMedia, createLocalStorage } = require('../lib/media-storage');
 const fs = require('node:fs/promises');
 const { tmpdir } = require('node:os');

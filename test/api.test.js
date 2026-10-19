@@ -6,6 +6,50 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 
 const read = (record, field) => field.split('.').reduce((value, key) => value?.[key], record);
+
+test('incoming replies sync with pagination, exact app correlation, old phone and deduplication', async (t) => {
+  let events = [], calls = [];
+  const { request, records } = await api(t, { sms: { configured: () => true, listInbound: async options => { calls.push(options); return { results: events.slice(options.offset, options.offset + 1), total: events.length }; } } });
+  const lead = records.leads[0];
+  lead.customer_phone = '+61400000000';
+  const outgoing = { _id: 'app-attempt', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', provider_message_id: 'out-1', created_at: '2026-10-01T00:00:00Z', status: 'delivered', body: 'Hello' };
+  records.customer_messages = [outgoing];
+  const reply = { message_id: 'reply-1', from: '0412 345 678', to: '61499990000', message: 'Yes please', type: 'inbound', received_at: '2026-10-02 01:00:00', original_message_id: 'out-1', original_custom_ref: 'app-attempt' };
+  events = [reply, { ...reply, message_id: 'foreign', original_message_id: 'delivery-centre', original_custom_ref: 'foreign' }, { ...reply, message_id: 'wrong-phone', from: '61400000000' }, { ...reply, message_id: 'conflict', original_message_id: 'foreign' }];
+  let response = await request(`/leads/${lead._id}/messages`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.pagination.total, 2);
+  assert.equal(calls.length, 4);
+  assert.equal(calls[0].from, '2026-10-01');
+  const incoming = response.body.data.messages.find(row => row.direction === 'inbound');
+  assert.equal(incoming.body, 'Yes please');
+  assert.equal(incoming.status, 'received');
+  assert.equal(incoming.source, 'Sales Floor');
+  assert.equal(incoming.phone, '+61412345678');
+  assert.equal(incoming.created_at, '2026-10-02T01:00:00.000Z');
+  assert.equal(lead.diary_entries.length, 1);
+  await request(`/leads/${lead._id}/messages`);
+  assert.equal(calls.length, 4, 'successful sync is cached');
+  lead.sms_inbound_synced_at = '2026-10-01T00:00:00Z';
+  await request(`/leads/${lead._id}/messages`);
+  assert.equal(records.customer_messages.length, 2);
+  assert.equal(lead.diary_entries.length, 1, 'repeated inbox reads do not duplicate diary entries');
+  assert.equal((await request(`/leads/${records.leads[2]._id}/messages`)).status, 404);
+});
+
+test('inbox outage preserves saved history, reports warning, and retries without advancing sync', async (t) => {
+  let fail = true;
+  const { request, records } = await api(t, { sms: { configured: () => true, listInbound: async () => { if (fail) throw new Error('provider outage'); return { results: [], total: 0 }; } } });
+  const lead = records.leads[0];
+  records.customer_messages = [{ _id: 'attempt', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', body: 'Saved', status: 'delivered', created_at: '2026-10-01T00:00:00Z' }];
+  const result = await request(`/leads/${lead._id}/messages`);
+  assert.equal(result.body.data.messages[0].body, 'Saved');
+  assert.match(result.body.data.history_warning, /Incoming messages/);
+  assert.equal(lead.sms_inbound_synced_at, undefined);
+  fail = false;
+  assert.equal((await request(`/leads/${lead._id}/messages`)).body.data.history_warning, undefined);
+  assert.ok(lead.sms_inbound_synced_at);
+});
 const equal = (a, b) => a instanceof ObjectId || b instanceof ObjectId ? String(a) === String(b) : a instanceof Date || b instanceof Date ? +new Date(a) === +new Date(b) : a === b;
 function matches(record, query) {
   return Object.entries(query).every(([field, value]) => {
@@ -81,7 +125,7 @@ async function api(t, services = {}) {
     actionitems: [{ _id: new ObjectId(), rooftopName: 'South Morang Kia', status: 'open' }],
   };
   const hooks = {};
-  const app = createApp({ historySources: {}, ...services, sms: { ...require('../lib/mobilemessage'), ...services.sms, lookupMessage: services.sms?.lookupMessage || (async () => null) }, database: async (key) => {
+  const app = createApp({ historySources: {}, ...services, sms: { ...require('../lib/mobilemessage'), ...services.sms, lookupMessage: services.sms?.lookupMessage || (async () => null), listInbound: services.sms?.listInbound || (async () => ({ results: [], total: 0 })) }, database: async (key) => {
     const db = fixtureDb(records);
     return { command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
       const collection = db.collection(name);
