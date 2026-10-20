@@ -479,6 +479,22 @@ router.post('/inventory/sync-csv', async (req, res) => {
   }
 });
 
+router.post('/leads/sync-flwup', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ success: false, error: 'Super admin access is required.' });
+  try {
+    const db = await getFlwupDb(req);
+    const { syncFlwupLeads } = require('./lib/flwup-sync');
+    const result = await syncFlwupLeads(db, {
+      forcedToken: req.body?.token,
+      rooftopId: req.body?.rooftop_id,
+    });
+    res.json({ success: true, message: 'FLWUP leads synchronized successfully.', data: result });
+  } catch (error) {
+    console.error('FLWUP sync error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to synchronize FLWUP leads.' });
+  }
+});
+
 router.get('/inventory/stats', async (req, res) => {
   try {
     const db = await getBooranDb(req);

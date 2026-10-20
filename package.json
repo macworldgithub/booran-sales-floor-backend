@@ -12,7 +12,8 @@
     "migrate:state": "node scripts/migrate-app-state.js",
     "ingest:csv": "node scripts/ingest-csv.js",
     "sync:inventory": "node scripts/ingest-csv.js",
-    "sync:watch": "node scripts/ingest-csv.js --watch"
+    "sync:watch": "node scripts/ingest-csv.js --watch",
+    "sync:flwup": "node scripts/sync-flwup.js"
   },
   "repository": {
     "type": "git",

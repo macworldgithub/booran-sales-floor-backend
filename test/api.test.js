@@ -325,12 +325,16 @@ test('Mongo date values in lead diary entries are preserved in API responses', (
   assert.equal(result.diary_entries[0].date, date.toISOString());
 });
 
-test('HTTP CSV sync endpoint enforces super admin role', async (t) => {
+test('HTTP CSV and FLWUP sync endpoints enforce super admin role', async (t) => {
   const { request, user } = await api(t);
   // Default user is manager -> 403
   const managerRes = await request('/inventory/sync-csv', { method: 'POST' });
   assert.equal(managerRes.status, 403);
   assert.equal(managerRes.body.success, false);
+
+  const managerFlwupRes = await request('/leads/sync-flwup', { method: 'POST' });
+  assert.equal(managerFlwupRes.status, 403);
+  assert.equal(managerFlwupRes.body.success, false);
 });
 
 test('resolveRooftop correctly normalizes branch codes and filenames', () => {
