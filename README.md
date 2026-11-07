@@ -13,6 +13,8 @@ The VPS deployment uses a dedicated `booran` system account, a separate PM2 proc
 
 Provision Node.js 22, PM2, Nginx, Certbot, Git, curl and flock. Clone the backend and web repos under `/var/www/booran/repositories` using their repo names. Store the backend secrets in `/var/www/booran/shared/backend.env` owned by `booran` with mode 0600. Populate the two MongoDB URLs, SMS credentials, Nextgate credentials and webhook secret as applicable. The PM2 configuration supplies the runtime ports, public origins, internal API URL and MongoDB media storage.
 
+If Nginx reports that the server name hash bucket is too small for the API alias, set `server_names_hash_bucket_size 128;` once in the shared `http` context before enabling the Booran site.
+
 ```bash
 sudo -u booran -H bash /var/www/booran/repositories/booran-sales-floor-backend/deploy.sh
 sudo pm2 startup systemd -u booran --hp /var/www/booran
