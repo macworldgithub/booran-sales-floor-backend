@@ -63,17 +63,19 @@ function matches(record, query) {
           case '$regex': return typeof actual === 'string' && new RegExp(expected, value.$options).test(actual);
           case '$options': return true;
           case '$exists': return (actual !== undefined) === expected;
+          case '$type': return typeof actual === expected;
           case '$gt': return actual > expected;
           case '$gte': return actual >= expected;
           case '$lt': return actual < expected;
           case '$lte': return actual <= expected;
           case '$ne': return !equal(actual, expected);
           case '$in': return expected.some((item) => equal(actual, item));
+          case '$nin': return expected.every((item) => !equal(actual, item));
           default: throw new Error(`Unimplemented fixture operator ${operator}`);
         }
       });
     }
-    return equal(actual, value);
+    return value === null ? actual == null : equal(actual, value);
   });
 }
 // In-memory storage exercises the real Express/auth/scoping/query/validation layers.
@@ -94,6 +96,24 @@ function fixtureDb(records) {
       async countDocuments(query) { return rows.filter((row) => matches(row, query)).length; },
       async insertOne(document) { document._id ||= new ObjectId(); if (rows.some((row) => equal(row._id, document._id))) throw Object.assign(new Error('Duplicate ID'), { code: 11000 }); rows.push(document); return { insertedId: document._id }; },
       async deleteOne(query) { const i = rows.findIndex((row) => matches(row, query)); if (i >= 0) rows.splice(i, 1); },
+      async updateMany(query, update) {
+        const matchesQuery = rows.filter(row => matches(row, query));
+        for (const row of matchesQuery) Object.assign(row, update.$set);
+        return { modifiedCount: matchesQuery.length };
+      },
+      async bulkWrite(operations) {
+        let upsertedCount = 0;
+        for (const { updateOne: { filter, update } } of operations) {
+          let row = rows.find(candidate => matches(candidate, filter));
+          if (!row) { row = { ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++; }
+          for (const [key, value] of Object.entries(update.$set)) {
+            const [field, child] = key.split('.');
+            if (child) (row[field] ||= {})[child] = value;
+            else row[field] = value;
+          }
+        }
+        return { upsertedCount };
+      },
       async findOneAndUpdate(query, update, options = {}) {
         let row = rows.find((item) => matches(item, query));
         if (!row && options.upsert) { row = { ...query, ...update.$setOnInsert }; rows.push(row); }
@@ -127,7 +147,7 @@ async function api(t, services = {}) {
   const hooks = {};
   const app = createApp({ historySources: {}, ...services, sms: { ...require('../lib/mobilemessage'), ...services.sms, lookupMessage: services.sms?.lookupMessage || (async () => null), listInbound: services.sms?.listInbound || (async () => ({ results: [], total: 0 })) }, database: async (key) => {
     const db = fixtureDb(records);
-    return { command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
+    return { client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) }, command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
       const collection = db.collection(name);
       return { ...collection, async findOne(query) {
         if (hooks.beforeFindOne) await hooks.beforeFindOne(name, query);
@@ -210,30 +230,103 @@ test('HTTP invalid request bodies and field types return 400 without corrupting 
   assert.equal(records.leads[0].customer_name, 'Alice');
   assert.equal((await request('/inventory/action-items/invalid', { method: 'PATCH', body: '{}' })).status, 400);
 });
-test('HTTP hold transitions reject sold vehicles, duplicate holds and inaccessible locations', async (t) => {
+test('HTTP retires new holds and still releases the exact legacy hold', async (t) => {
   const { request, records } = await api(t);
   const hold = (stock) => request(`/inventory/vehicles/${stock}/soft-hold`, { method: 'POST', body: JSON.stringify({ prospectName: 'Alice', consultant: 'Spoofed' }) });
   const release = (stock, expected = records.vehicles.find((vehicle) => vehicle.stockNumber === stock)?.softHold || { holdId: 'not-current' }) => request(`/inventory/vehicles/${stock}/release-hold`, { method: 'POST', body: JSON.stringify({ holdId: expected.holdId, heldAt: expected.heldAt }) });
-  const concurrent = await Promise.all([hold('S1'), hold('S1')]);
-  assert.deepEqual(concurrent.map((result) => result.status).sort(), [200, 409]);
-  assert.equal(records.vehicles[0].softHold.consultant, 'South Morang Manager');
-  assert.equal((await hold('S2')).status, 409);
+  assert.equal((await hold('S1')).status, 410);
+  assert.equal(records.vehicles[0].status, 'In Stock');
+  assert.equal((await hold('S2')).status, 410);
   assert.equal((await release('S2')).status, 409);
   assert.equal(records.vehicles[1].status, 'Sold');
-  assert.equal((await hold('C1')).status, 404);
-  const previousHold = { ...records.vehicles[0].softHold };
-  records.vehicles[0].softHold.expiresAt = new Date(0).toISOString();
+  assert.equal((await release('C1')).status, 404);
+  records.vehicles[0].status = 'Soft Hold';
+  records.vehicles[0].softHold = { holdId: 'legacy', held: true, expiresAt: new Date(0).toISOString() };
   const expired = await request('/inventory/vehicles/S1');
   assert.equal(expired.body.data.status, 'In Stock');
   assert.equal(expired.body.data.softHold.held, false);
   const available = await request('/inventory/vehicles?status=In%20Stock');
   assert.deepEqual(available.body.data.map((vehicle) => vehicle.stockNumber), ['S1']);
   assert.equal((await request('/inventory/vehicles?status=Soft%20Hold')).body.pagination.total, 0);
-  assert.equal((await hold('S1')).status, 200);
-  assert.equal((await release('S1', previousHold)).status, 409);
+  assert.equal((await release('S1', { holdId: 'previous' })).status, 409);
   assert.equal(records.vehicles[0].status, 'Soft Hold');
   assert.equal((await release('S1')).status, 200);
   assert.equal((await release('S1')).status, 409);
+});
+
+test('Nextgate events populate the scoped queue immediately, and replay preserves an allocation', async (t) => {
+  const secret = 'nextgate-test-secret-00000001';
+  const previous = process.env.NEXGATE_WEBHOOK_SECRET;
+  process.env.NEXGATE_WEBHOOK_SECRET = secret;
+  t.after(() => { if (previous === undefined) delete process.env.NEXGATE_WEBHOOK_SECRET; else process.env.NEXGATE_WEBHOOK_SECRET = previous; });
+  const { request, records, user } = await api(t);
+  const [, sellerIdentifier] = require('../lib/nexgate-client').DEALERSHIPS[0];
+  const event = {
+    sellerIdentifier,
+    customer: { id: 'test-customer', firstName: 'New', lastName: 'Prospect', email: 'test@example.com' },
+    lead: { id: 'test-enquiry', leadCreatedDate: '2026-11-07T08:00:00Z', leadSource: 'carsales', stage: 'New' },
+  };
+  const put = (data, authorization = '') => request('/integrations/nexgate/leads', { method: 'POST', headers: { authorization, cookie: '' }, body: JSON.stringify(data) });
+  assert.equal((await put(event)).status, 401);
+  const authorization = `Bearer ${secret}`;
+  assert.equal((await put({ ...event, sellerIdentifier: 'unknown' }, authorization)).status, 400);
+  assert.equal((await put(event, authorization)).body.data.inserted, 1);
+  const filter = '/leads?source=Nextgate&channel=carsales&assignment=unassigned&limit=1';
+  const list = await request(filter);
+  assert.equal(list.body.pagination.total, 1);
+  assert.equal(list.body.data[0].dealership, 'South Morang Kia');
+  assert.equal((await request(`${filter}&dealership=Booran%20Cheltenham`)).body.pagination.total, 0);
+  const id = list.body.data[0]._id;
+  const own = { _id: new ObjectId(), name: 'Eligible salesperson', email: 'sales@example.com', active: true, role: 'sales_consultant', site: 'South Morang Kia' };
+  const other = { ...own, _id: new ObjectId(), name: 'Other site', site: 'Booran Cheltenham' };
+  records.users.push(own, other);
+  records.appraisals = [{ _id: new ObjectId(), dealership: 'South Morang Kia', lead_id: id, owner_id: null }];
+  const assign = (person, expectedOwnerId = null) => request(`/leads/${id}/assignment`, { method: 'PATCH', body: JSON.stringify({ assigneeId: person && String(person._id), expectedOwnerId }) });
+  for (const role of ['dealer_principal', 'general_manager', 'sales_manager', 'manager']) {
+    user.role = role;
+    const options = await request(`/leads/${id}/assignees`);
+    assert.deepEqual(options.body.data.map(item => item.name).sort(), [own.name, user.name].sort());
+  }
+  assert.equal((await assign(other)).status, 403);
+  assert.equal((await assign(own)).body.data.owner_id, String(own._id));
+  assert.equal(records.appraisals[0].owner_id, String(own._id));
+  assert.equal((await assign(user)).status, 409);
+  assert.equal((await request(filter)).body.pagination.total, 0);
+  assert.equal((await put({ ...event, lead: { ...event.lead, stage: 'Contacted' } }, authorization)).body.data.inserted, 0);
+  assert.equal((await request(`/leads/${id}`)).body.data.owner_name, own.name);
+  assert.equal((await request(`/leads/${id}`)).body.data.source_stage, 'Contacted');
+  const consultantToken = 'd'.repeat(64);
+  records.sessions.push({ _id: createHash('sha256').update(consultantToken).digest('hex'), userId: own._id, expiresAt: new Date(Date.now() + 60000) });
+  const headers = { authorization: `Bearer ${consultantToken}` };
+  assert.equal((await request('/leads', { headers })).body.pagination.total, 1);
+  assert.equal((await request(`/leads/${id}/assignees`, { headers })).status, 403);
+  assert.equal((await request(`/leads/${records.leads[1]._id}`, { headers })).status, 404);
+  assert.equal((await assign(null, String(own._id))).body.data.owner_id, null);
+  assert.equal((await request('/leads', { headers })).body.pagination.total, 0);
+});
+
+test('a registered deal marks a vehicle pending and unavailable inventory blocks new deals', async (t) => {
+  const { request, records } = await api(t);
+  const leadId = String(records.leads[1]._id);
+  const register = (stockNumber) => request(`/leads/${leadId}/deals`, { method: 'POST', body: JSON.stringify({ stockNumber }) });
+  assert.equal((await register('S2')).status, 409);
+  const vehicle = { _id: new ObjectId(), stockNumber: 'K-PENDING', rooftopName: 'South Morang Kia', status: 'In Stock', vin: 'KM8J33A41GU123456', daysInStock: 20 };
+  records.vehicles.push(vehicle);
+  assert.equal((await register('K-PENDING')).status, 201);
+  const pending = await request('/inventory/vehicles?status=Deal%20Pending');
+  assert.deepEqual(pending.body.data.map(row => row.stockNumber), ['K-PENDING']);
+  assert.equal(pending.body.data[0].status, 'Deal Pending');
+  const stock = await request('/inventory/vehicles');
+  assert.deepEqual(stock.body.data.map(row => row.stockNumber), ['S1']);
+  assert.equal((await request('/inventory/vehicles/K-PENDING')).body.data.status, 'Deal Pending');
+  assert.equal(vehicle.status, 'In Stock');
+});
+
+test('a calendar day uses Melbourne midnight, including the DST transition', () => {
+  const { periodWindow } = require('../lib/pulse');
+  assert.deepEqual(periodWindow('today', new Date('2026-10-04T01:00:00Z')), {
+    from: '2026-10-03T14:00:00.000Z', to: '2026-10-04T13:00:00.000Z',
+  });
 });
 test('HTTP appointments validate dates, types, durations and linked dealership', async (t) => {
   const { request, records } = await api(t);

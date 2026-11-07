@@ -9,11 +9,13 @@
     "test": "node --test",
     "check": "node --check server.js",
     "seed:accounts": "node scripts/seed-accounts.js",
+    "init:state": "node scripts/init-app-state.js",
     "migrate:state": "node scripts/migrate-app-state.js",
     "ingest:csv": "node scripts/ingest-csv.js",
     "sync:inventory": "node scripts/ingest-csv.js",
     "sync:watch": "node scripts/ingest-csv.js --watch",
-    "sync:flwup": "node scripts/sync-flwup.js"
+    "sync:flwup": "node scripts/sync-flwup.js",
+    "sync:nexgate": "node scripts/import-nexgate.js"
   },
   "repository": {
     "type": "git",

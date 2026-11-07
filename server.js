@@ -1,33 +1,42 @@
-const dns = require('dns');
-if (typeof dns.setServers === 'function') {
-  try {
-    dns.setServers(['8.8.8.8', '1.1.1.1']);
-  } catch (_) {}
-}
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
-const { text, escapeRegex, pageQuery, leadQuery, vehicleQuery, actionQuery } = require('./lib/query');
+const { text, escapeRegex, pageQuery, leadQuery, vehicleQuery, actionQuery, isAllLocations } = require('./lib/query');
 const { scopedDatabase } = require('./lib/access');
 const { installAuth } = require('./lib/auth');
 const { invalid, dealership, serializeLead, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
-const { changeHold, serializeVehicle } = require('./lib/vehicle-holds');
+const { releaseHold, visibleVehicle, visibleAction } = require('./lib/vehicle-holds');
 const { installPublicMedia, installCustomerMessages } = require('./lib/customer-messages');
 const mobileMessage = require('./lib/mobilemessage');
 const { createMediaStorage } = require('./lib/mongo-media-storage');
+const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
+const { installAllocation } = require('./lib/lead-allocation');
+const { isManager, canViewCost } = require('./lib/roles');
+const { installPulse, calendarDay } = require('./lib/pulse');
+const { installSalesWorkflows } = require('./lib/sales-workflows');
+const { installSitePresence } = require('./lib/site-presence');
+const { installProspects, businessId } = require('./lib/prospects');
+const { installLeadAlerts, recordAlert, checkAgedLeads } = require('./lib/lead-alerts');
 
 
 require('dotenv').config();
+if (require.main === module && !process.env.VERCEL) require('./lib/nexgate-client').loadLocalNexgateEnvironment();
 
 // Reuse a connected pool and its in-flight promise across serverless requests.
 const connections = new Map();
+const clients = new Set();
 async function database(envKey) {
   if (!connections.has(envKey)) {
     const uri = process.env[envKey];
     if (!uri) throw new Error(`${envKey} is not configured`);
-    const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000 });
+    const client = new MongoClient(uri, {
+      maxPoolSize: process.env.VERCEL ? 5 : 20,
+      maxIdleTimeMS: 60000, waitQueueTimeoutMS: 5000, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000,
+    });
+    clients.add(client);
     const pending = client.connect().then(() => client.db()).catch(async (error) => {
       connections.delete(envKey);
+      clients.delete(client);
       await client.close().catch(() => {});
       throw error;
     });
@@ -36,9 +45,12 @@ async function database(envKey) {
   return connections.get(envKey);
 }
 
-function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage } = {}) {
+function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate } = {}) {
 const app = express();
+if (process.env.TRUST_LOOPBACK_PROXY === 'true') app.set('trust proxy', 'loopback');
 const storage = providedStorage || createMediaStorage(() => resolveDatabase('MONGODB_URI_FLWUP'));
+const nextgate = nexgate || nexgateService(() => resolveDatabase('MONGODB_URI_FLWUP'));
+app.locals.nextgate = nextgate;
 
 // CORS setup for production (Vercel & Custom Domains)
 app.use(
@@ -63,6 +75,7 @@ app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => {
   if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
     if (req.method === 'PUT' && /^\/(api\/)?leads\/[^/]+\/media\/[^/]+\/content$/.test(req.path)) return next();
+    if (req.method === 'PUT' && /^\/(api\/)?deliveries\/[^/]+\/accessories\/[^/]+\/proof$/.test(req.path)) return next();
     if (req.body === undefined && !req.headers['content-length'] && !req.headers['transfer-encoding']) req.body = {};
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({ success: false, error: 'The request body must be a JSON object.' });
   }
@@ -77,6 +90,16 @@ app.use((req, res, next) => {
 
 const getFlwupDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_FLWUP'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
 const getBooranDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_BOORAN'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
+const stockDeals = async (req, key) => {
+  if (req.user.role === 'contractor') return [];
+  // Stock availability is dealership-wide, even when the associated customer
+  // and deal details are restricted to the consultant who owns them.
+  const user = req.user.role === 'sales_consultant' ? { ...req.user, role: 'manager' } : req.user;
+  const db = scopedDatabase(await getFlwupDb(), user, req.query.rooftop);
+  return db.collection('deals').find({
+    stock_key: key ?? { $exists: true }, status: { $in: ['registered', 'completed'] },
+  }, { projection: { _id: 0, stock_key: 1, status: 1 } }).toArray();
+};
 
 // Router for all API routes (mounted at both /api and / for seamless Vercel compatibility)
 const router = express.Router();
@@ -117,8 +140,17 @@ router.get('/health', async (req, res) => {
 // ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
 
 installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
+const sweepLeadAlerts = async () => checkAgedLeads(await getFlwupDb());
+installNexgate(router, nextgate, sweepLeadAlerts);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
-installCustomerMessages(router, getFlwupDb, sms, storage);
+installAllocation(router, getFlwupDb);
+installProspects(router, getFlwupDb);
+installPulse(router, getFlwupDb);
+installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
+installSitePresence(router, getFlwupDb, storage);
+installLeadAlerts(router, getFlwupDb);
+installCustomerMessages(router, getFlwupDb, sms, storage, async (lead, id, message) =>
+  recordAlert(await getFlwupDb(), lead, id, message));
 
 router.get('/leads', async (req, res) => {
   try {
@@ -175,6 +207,12 @@ router.get('/leads/:id', async (req, res) => {
 router.post('/leads', async (req, res) => {
   try {
     const newLead = createLead(req.body, req.user);
+    newLead.business_id = businessId(newLead.dealership_name, newLead.business_name);
+    if (!isManager(req.user) && req.user.role !== 'sales_consultant') return res.sendStatus(403);
+    if (req.user.role === 'sales_consultant' || newLead.owner_name === req.user.name) {
+      newLead.owner_id = req.user.id;
+      newLead.owner_name = req.user.name;
+    }
     const db = await getFlwupDb(req);
 
     const result = await db.collection('leads').insertOne(newLead);
@@ -196,6 +234,19 @@ router.patch('/leads/:id', async (req, res) => {
     }
 
     const updateDoc = leadUpdate(req.body, req.user);
+    if (Object.hasOwn(updateDoc.$set, 'business_name')) {
+      const lead = await db.collection('leads').findOne(query);
+      if (!lead) return res.status(404).json({ success: false, error: 'Lead not found.' });
+      updateDoc.$set.business_id = businessId(lead.dealership_name, updateDoc.$set.business_name);
+    }
+    if (Object.hasOwn(updateDoc.$set, 'owner_name') || Object.hasOwn(updateDoc.$set, 'dealership_name')) {
+      if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Only managers can change allocation.' });
+      const existing = await db.collection('leads').findOne(query);
+      if (existing && (existing.source === 'Nextgate' || existing.owner_id)) {
+        return res.status(409).json({ success: false, error: 'Use lead allocation to change the assignee of this lead.' });
+      }
+      query = { ...query, owner_id: { $exists: false }, source: { $ne: 'Nextgate' } };
+    }
 
     const result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Lead not found.' });
@@ -315,9 +366,17 @@ router.get('/staff', async (req, res) => {
 router.get('/inventory/vehicles', async (req, res) => {
   try {
     const db = await getBooranDb(req);
-    const { page, limit, skip, sort: sortOptions } = pageQuery(req.query, 'vehicles', 'daysInStock');
+    const options = { ...req.query };
+    if (!canViewCost(req.user) && options.sortBy === 'totalStockCost') delete options.sortBy;
+    const { page, limit, skip, sort: sortOptions } = pageQuery(options, 'vehicles', 'daysInStock');
 
-    const query = vehicleQuery(req.query);
+    const dealRows = await stockDeals(req);
+    const deals = new Map(dealRows.filter(row => ObjectId.isValid(row.stock_key)).map(row => [new ObjectId(row.stock_key), row.status]));
+    const statusByStock = new Map(dealRows.map(row => [row.stock_key, row.status]));
+    const query = vehicleQuery({
+      ...options,
+      status: options.status ?? (isAllLocations(options.rooftop) ? 'In Stock' : 'all'),
+    }, new Date(), deals);
 
     const [vehicles, total] = await Promise.all([
       db.collection('vehicles').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
@@ -326,7 +385,7 @@ router.get('/inventory/vehicles', async (req, res) => {
 
     res.json({
       success: true,
-      data: vehicles.map((vehicle) => serializeVehicle(vehicle)),
+      data: vehicles.map((vehicle) => visibleVehicle(vehicle, req.user, statusByStock.get(String(vehicle._id)))),
       pagination: {
         total,
         page,
@@ -356,32 +415,20 @@ router.get('/inventory/vehicles/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Vehicle not found' });
     }
 
-    res.json({ success: true, data: serializeVehicle(vehicle) });
+    const [deal] = await stockDeals(req, String(vehicle._id));
+    res.json({ success: true, data: visibleVehicle(vehicle, req.user, deal?.status) });
   } catch (err) {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
   }
 });
 
-router.post('/inventory/vehicles/:id/soft-hold', async (req, res) => {
-  try {
-    const db = await getBooranDb(req);
-    const { id } = req.params;
-    let query;
-    try {
-      query = { _id: new ObjectId(id) };
-    } catch {
-      query = { stockNumber: id };
-    }
-
-    const result = await changeHold(db.collection('vehicles'), query, req.body, req.user);
-    res.json({ success: true, message: 'Vehicle placed on soft hold', data: result });
-  } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
-  }
+router.post('/inventory/vehicles/:id/soft-hold', (req, res) => {
+  res.status(410).json({ success: false, error: 'New vehicle holds have been retired.' });
 });
 
 router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
   try {
+    if (!isManager(req.user)) return res.sendStatus(403);
     const db = await getBooranDb(req);
     const { id } = req.params;
     let query;
@@ -391,7 +438,7 @@ router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
       query = { stockNumber: id };
     }
 
-    const result = await changeHold(db.collection('vehicles'), query, req.body, req.user, true);
+    const result = await releaseHold(db.collection('vehicles'), query, req.body);
     res.json({ success: true, message: 'Vehicle hold released', data: result });
   } catch (err) {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
@@ -413,7 +460,7 @@ router.get('/inventory/action-items', async (req, res) => {
 
     res.json({
       success: true,
-      data: items,
+      data: items.map(item => visibleAction(item, req.user)),
       pagination: {
         total,
         page,
@@ -428,6 +475,7 @@ router.get('/inventory/action-items', async (req, res) => {
 
 router.patch('/inventory/action-items/:id', async (req, res) => {
   try {
+    if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Only managers can resolve inventory actions.' });
     const db = await getBooranDb(req);
     const { id } = req.params;
     if (!ObjectId.isValid(id)) invalid('Invalid action item ID.');
@@ -530,6 +578,7 @@ router.get('/inventory/stats', async (req, res) => {
     agingBucketsAgg.forEach((b) => {
       agingBuckets[b._id || 'unknown'] = b.count;
     });
+    agingBuckets['31-60'] = (agingBuckets['31-60'] || 0) + (agingBuckets['31-45'] || 0) + (agingBuckets['46-60'] || 0);
 
     const categories = Object.create(null);
     categoriesAgg.forEach((c) => {
@@ -552,8 +601,7 @@ router.get('/inventory/stats', async (req, res) => {
         over90DaysCount: agingBuckets['90+'] || 0,
         openActionItems: totalActionItems,
         actionTypes,
-        totalStockCost: totals.totalStockCost || 0,
-        totalHoldingCost: totals.totalHoldingCost || 0,
+        ...(canViewCost(req.user) ? { totalStockCost: totals.totalStockCost || 0, totalHoldingCost: totals.totalHoldingCost || 0 } : {}),
         avgDaysInStock: Math.round(totals.avgDaysInStock || 0),
       },
     });
@@ -569,6 +617,9 @@ router.get('/appointments', async (req, res) => {
     const db = await getFlwupDb(req);
     const { page, limit, skip } = pageQuery(req.query, 'appointments', 'when');
     const query = {};
+    if (req.query.date && !req.query.from && !req.query.to) {
+      query.when = calendarDay(req.query.date);
+    }
     if (req.query.from || req.query.to) {
       query.when = {};
       for (const [key, operator] of [['from', '$gte'], ['to', '$lt']]) {
@@ -578,6 +629,7 @@ router.get('/appointments', async (req, res) => {
     }
     if (query.when?.$gte && query.when?.$lt && query.when.$gte >= query.when.$lt) invalid('The end date must follow the start date.');
     if (req.query.type && req.query.type !== 'all') query.type = req.query.type;
+    if (req.query.consultant && isManager(req.user)) query.consultantName = req.query.consultant;
     const [data, total] = await Promise.all([
       db.collection('appointments').find(query).sort({ when: 1, _id: 1 }).skip(skip).limit(limit).toArray(),
       db.collection('appointments').countDocuments(query),
@@ -589,6 +641,7 @@ router.get('/appointments', async (req, res) => {
 });
 router.post('/appointments', async (req, res) => {
   try {
+    if (req.user.role === 'contractor') return res.sendStatus(403);
     const input = appointmentInput(req.body);
     const db = await getFlwupDb(req);
     let linkedLead = null;
@@ -599,7 +652,8 @@ router.post('/appointments', async (req, res) => {
     }
     const site = dealership(req.body.dealership || linkedLead?.dealership_name);
     if (linkedLead && site.toLowerCase() !== linkedLead.dealership_name.toLowerCase()) invalid('The appointment must use the linked lead dealership.');
-    const appointment = { ...input, dealership: site };
+    const appointment = { ...input, leadId: linkedLead ? String(linkedLead._id) : input.leadId, dealership: site, consultant_id: linkedLead?.owner_id || req.user.id };
+    if (req.user.role === 'sales_consultant') appointment.consultantName = req.user.name;
     const result = await db.collection('appointments').insertOne(appointment);
     res.status(201).json({ success: true, data: { ...appointment, _id: result.insertedId.toString() } });
   } catch (error) {
@@ -698,8 +752,8 @@ router.get('/unified/search', async (req, res) => {
       success: true,
       data: {
         leads: leads.map(serializeLead),
-        vehicles: vehicles.map((vehicle) => serializeVehicle(vehicle)),
-        actionItems,
+        vehicles: vehicles.map((vehicle) => visibleVehicle(vehicle, req.user)),
+        actionItems: actionItems.map(item => visibleAction(item, req.user)),
       },
     });
   } catch (err) {
@@ -725,12 +779,27 @@ const app = createApp();
 // Start server if run directly (local development)
 if (!process.env.VERCEL) {
   if (require.main === module) {
-    const port = process.env.PORT || 5001;
-    app.listen(port, () => {
-      console.log(`=======================================================`);
-      console.log(`Booran Motors Sales Floor API running on port ${port}`);
-      console.log(`Health endpoint: http://localhost:${port}/api/health`);
-      console.log(`=======================================================`);
+    const port = Number(process.env.PORT || 5001);
+    const host = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
+    const timers = [];
+    const interval = (work, delay) => timers.push(setInterval(work, delay).unref());
+    const server = app.listen(port, host, () => {
+      console.log(`Booran Sales Floor API listening on ${host}:${port}`);
+
+      if (app.locals.nextgate.configured) {
+        const reconcile = () => app.locals.nextgate.sync().then(result => {
+          if (!result.success) console.warn('Nextgate sync completed with seller failures.');
+        }).catch(() => console.warn('Nextgate sync unavailable.'));
+        reconcile();
+        interval(reconcile, HOUR);
+        const fastInterval = Number(process.env.NEXGATE_LIVE_POLL_MS);
+        if (Number.isInteger(fastInterval) && fastInterval >= 15000 && fastInterval < HOUR) {
+          const poll = () => app.locals.nextgate.pollLatest().catch(() => console.warn('Nextgate live poll unavailable.'));
+          interval(poll, fastInterval);
+        }
+      }
+      const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
+      interval(checkAlerts, HOUR);
 
       if (process.env.AUTO_SYNC_CSV !== 'false') {
         const { syncCsvData, startCsvWatcher } = require('./scripts/ingest-csv');
@@ -743,6 +812,23 @@ if (!process.env.VERCEL) {
         }
       }
     });
+    server.headersTimeout = 15000;
+    server.requestTimeout = 60000;
+    server.keepAliveTimeout = 65000;
+    let stopping = false;
+    const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
+      timers.forEach(clearInterval);
+      const deadline = setTimeout(() => process.exit(1), 30000).unref();
+      server.close(async () => {
+        await Promise.allSettled([...clients].map(client => client.close()));
+        clearTimeout(deadline);
+        process.exit(0);
+      });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   }
 }
 
