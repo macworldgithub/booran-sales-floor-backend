@@ -25,6 +25,8 @@ sudo bash /var/www/booran/current/backend/deploy/install-nginx.sh tls
 
 The release script fetches both main branches, installs locked dependencies, builds the Next.js standalone output, initializes MongoDB indexes, and switches the current symlink. It checks the API, web and web proxy before saving PM2. It restores the previous release if a health check fails. Set `BOORAN_FETCH=false` to deploy local main refs supplied via Git bundles when the VPS has no GitHub credentials. Keep at least the previous release directory. Install `deploy/logrotate.conf` under `/etc/logrotate.d/booran-sales-floor` for the application logs.
 
+Use `deploy.sh --prepare-only` to build without switching PM2, then `deploy.sh --activate <release-path>` to initialize the database and activate that build.
+
 Check the four HTTPS hosts after activation. For each API hostname request `/api/health`. For each web hostname request `/` and `/api/health`. Use the native app repo separately for Android and iOS releases.
 
 ## Nextgate lead queue

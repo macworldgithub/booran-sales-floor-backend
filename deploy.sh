@@ -27,28 +27,40 @@ revision() {
   fi
 }
 
-backend_sha="$(revision "$backend_repo")"
-web_sha="$(revision "$web_repo")"
-release="$(mktemp -d "$root/releases/$(date -u +%Y%m%dT%H%M%SZ)-${backend_sha:0:8}-${web_sha:0:8}-XXXX")"
-mkdir "$release/backend" "$release/web"
-git -C "$backend_repo" archive "$backend_sha" | tar -xf - -C "$release/backend"
-git -C "$web_repo" archive "$web_sha" | tar -xf - -C "$release/web"
-ln -s "$root/shared/backend.env" "$release/backend/.env"
-
-echo "Building Booran backend $backend_sha and web $web_sha"
-(
-  cd "$release/backend"
-  npm ci --omit=dev --no-audit --no-fund
-  npm run check
-)
-(
-  cd "$release/web"
-  npm ci --include=dev --no-audit --no-fund
-  export NEXT_TELEMETRY_DISABLED=1
-  export NODE_OPTIONS="${BOORAN_BUILD_NODE_OPTIONS:---max-old-space-size=2048}"
-  nice -n 10 npm run build
-  test -f .next/standalone/server.js
-)
+if [[ "$#" == 2 && "$1" == --activate ]]; then
+  release="$(realpath -e -- "$2")"
+  [[ "$(dirname "$release")" == "$(realpath "$root/releases")" && -f "$release/revisions" ]] ||
+    { echo 'Select a prepared release under the Booran releases directory.' >&2; exit 1; }
+else
+  [[ "$#" == 0 || ( "$#" == 1 && "$1" == --prepare-only ) ]] ||
+    { echo 'Usage: deploy.sh [--prepare-only | --activate release-path]' >&2; exit 1; }
+  backend_sha="$(revision "$backend_repo")"
+  web_sha="$(revision "$web_repo")"
+  release="$(mktemp -d "$root/releases/$(date -u +%Y%m%dT%H%M%SZ)-${backend_sha:0:8}-${web_sha:0:8}-XXXX")"
+  mkdir "$release/backend" "$release/web"
+  git -C "$backend_repo" archive "$backend_sha" | tar -xf - -C "$release/backend"
+  git -C "$web_repo" archive "$web_sha" | tar -xf - -C "$release/web"
+  ln -s "$root/shared/backend.env" "$release/backend/.env"
+  echo "Building Booran backend $backend_sha and web $web_sha"
+  (
+    cd "$release/backend"
+    npm ci --omit=dev --no-audit --no-fund
+    npm run check
+  )
+  (
+    cd "$release/web"
+    npm ci --include=dev --no-audit --no-fund
+    export NEXT_TELEMETRY_DISABLED=1
+    export NODE_OPTIONS="${BOORAN_BUILD_NODE_OPTIONS:---max-old-space-size=2048}"
+    nice -n 10 npm run build
+    test -f .next/standalone/server.js
+  )
+  printf 'backend=%s\nweb=%s\n' "$backend_sha" "$web_sha" > "$release/revisions"
+  if [[ "${1:-}" == --prepare-only ]]; then
+    printf 'Prepared Booran release %s\n' "$release"
+    exit 0
+  fi
+fi
 (
   cd "$release/backend"
   npm run init:state
@@ -100,5 +112,4 @@ if ! reload || ! health; then
 fi
 
 pm2 save
-printf 'backend=%s\nweb=%s\n' "$backend_sha" "$web_sha" > "$release/revisions"
 printf 'Booran is healthy on loopback. Release %s\n' "$release"
