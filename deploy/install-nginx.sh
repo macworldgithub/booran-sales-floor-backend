@@ -8,7 +8,7 @@ source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 site=/etc/nginx/sites-available/booran-sales-floor
 enabled=/etc/nginx/sites-enabled/booran-sales-floor
 acme=/var/www/booran/shared/acme
-install -d -m 0755 "$acme/.well-known/acme-challenge"
+install -d -m 0755 "$acme" "$acme/.well-known" "$acme/.well-known/acme-challenge"
 
 if [[ -e "$enabled" && ! -L "$enabled" ]]; then
   echo "Expected $enabled to be a symlink." >&2
