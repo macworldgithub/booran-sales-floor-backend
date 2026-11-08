@@ -95,7 +95,14 @@ function fixtureDb(records) {
       },
       async findOne(query) { return rows.find((row) => matches(row, query)) || null; },
       async countDocuments(query) { return rows.filter((row) => matches(row, query)).length; },
-      async insertOne(document) { document._id ||= new ObjectId(); if (rows.some((row) => equal(row._id, document._id))) throw Object.assign(new Error('Duplicate ID'), { code: 11000 }); rows.push(document); return { insertedId: document._id }; },
+      async insertOne(document) {
+        document._id ||= new ObjectId();
+        if (rows.some(row => equal(row._id, document._id) || (name === 'users' && row.email === document.email))) {
+          throw Object.assign(new Error('Duplicate key'), { code: 11000 });
+        }
+        rows.push(document);
+        return { insertedId: document._id };
+      },
       async deleteOne(query) { const i = rows.findIndex((row) => matches(row, query)); if (i >= 0) rows.splice(i, 1); },
       async updateMany(query, update) {
         const matchesQuery = rows.filter(row => matches(row, query));
@@ -165,6 +172,50 @@ async function api(t, services = {}) {
   }
   return { request, records, user, token, hooks, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
 }
+test('staff administration requires a super admin and applies saved site access to existing sessions', async (t) => {
+  const { request, records, user } = await api(t);
+  records.rooftops = [{ name: 'South Morang Kia' }, { name: 'Booran Cheltenham' }];
+  const endpoint = '/admin/staff';
+  const create = data => request(endpoint, { method: 'POST', body: JSON.stringify(data) });
+  const input = {
+    name: 'Staff fixture', email: 'Staff@Example.com', password: 'staff-fixture-password',
+    role: 'sales_manager', site: 'south morang kia', allowedSites: ['South Morang Kia'],
+  };
+
+  assert.equal((await request(endpoint, { headers: { cookie: '' } })).status, 401);
+  assert.equal((await request(endpoint)).status, 403);
+  assert.equal((await create(input)).status, 403);
+  user.role = 'super_admin';
+  assert.equal((await create({ ...input, role: 'super_admin' })).status, 400);
+  assert.equal((await create({ ...input, allowedSites: ['*'] })).status, 400);
+  assert.equal((await create({ ...input, allowedSites: ['Booran Cheltenham'] })).status, 400);
+  assert.equal((await create({ ...input, password: 'short' })).status, 400);
+  const created = await create(input);
+  assert.equal(created.status, 201);
+  const account = created.body.data;
+  assert.equal(account.email, 'staff@example.com');
+  assert.deepEqual(account.allowedSites, ['South Morang Kia']);
+  assert.equal(account.passwordHash, undefined);
+  assert.equal((await create(input)).status, 409);
+  const directory = (await request(endpoint)).body.data;
+  assert.deepEqual(directory.accounts, [account]);
+  assert.ok(directory.sites.includes('Booran Cheltenham'));
+
+  const login = await request('/auth/login', {
+    method: 'POST', headers: { cookie: '' },
+    body: JSON.stringify({ email: account.email, password: input.password }),
+  });
+  assert.equal(login.status, 200);
+  const headers = { cookie: login.headers.get('set-cookie').split(';')[0] };
+  assert.deepEqual((await request('/leads', { headers })).body.data.map(lead => lead.name), ['Bob']);
+  const update = id => request(`${endpoint}/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ role: 'manager', site: 'Booran Cheltenham', allowedSites: ['Booran Cheltenham'] }),
+  });
+  assert.equal((await update(user._id)).status, 404);
+  assert.equal((await update(account.id)).status, 200);
+  assert.deepEqual((await request('/leads', { headers })).body.data.map(lead => lead.name), ['Carol']);
+});
+
 test('HTTP login, session expiry and logout enforce authentication', async (t) => {
   const { request, records } = await api(t);
   assert.equal((await request('/leads', { headers: { cookie: '' } })).status, 401);
