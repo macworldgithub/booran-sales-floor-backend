@@ -13,7 +13,8 @@ test('site scope cannot be replaced by a user supplied location or OR condition'
   const regex = new RegExp(condition.$regex, condition.$options);
   assert.equal(regex.test('BYD South Morang'), true);
   assert.equal(regex.test('Booran Cheltenham'), false);
-  assert.deepEqual(scopeQuery({ role: 'super_admin' }, 'vehicles', query), query);
+  assert.deepEqual(result.$and[2], { salesFloorHidden: { $ne: true } });
+  assert.deepEqual(scopeQuery({ role: 'super_admin' }, 'vehicles', query), { $and: [query, { salesFloorHidden: { $ne: true } }] });
   assert.deepEqual(scopeQuery(manager, 'feedlogs').$and[1], { _id: { $exists: false } });
 });
 test('inserts and updates reject moving records outside the authorised site', () => {

@@ -10,6 +10,7 @@ function matches(record, query) {
     if (field === '$or') return predicate.some((clause) => matches(record, clause));
     if (predicate && typeof predicate === 'object') {
       if ('$exists' in predicate) return (record[field] !== undefined) === predicate.$exists;
+      if ('$ne' in predicate) return record[field] !== predicate.$ne;
       if ('$regex' in predicate) return typeof record[field] === 'string' && new RegExp(predicate.$regex, predicate.$options).test(record[field]);
     }
     return record[field] === predicate;

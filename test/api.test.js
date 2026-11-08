@@ -216,6 +216,38 @@ test('staff administration requires a super admin and applies saved site access 
   assert.deepEqual((await request('/leads', { headers })).body.data.map(lead => lead.name), ['Carol']);
 });
 
+test('hidden vehicles remain stored and sales consultants see only their own work', async (t) => {
+  const { request, records, user } = await api(t);
+  const hidden = records.vehicles[1];
+  hidden.salesFloorHidden = true;
+  const list = await request('/inventory/vehicles?status=all');
+  assert.equal(list.status, 200);
+  assert.equal(list.body.pagination.total, 1);
+  assert.equal((await request(`/inventory/vehicles/${hidden._id}`)).status, 404);
+  assert.equal((await request('/unified/search?q=S2')).body.data.vehicles.length, 0);
+  user.role = 'super_admin';
+  assert.equal((await request(`/inventory/vehicles/${hidden._id}`)).status, 404);
+  assert.equal(records.vehicles.length, 3);
+
+  user.role = 'sales_consultant';
+  const own = String(user._id);
+  records.leads[0].owner_id = own;
+  records.appointments = [
+    { _id: new ObjectId(), dealership: 'BYD South Morang', consultant_id: own, prospectName: 'My booking' },
+    { _id: new ObjectId(), dealership: 'BYD South Morang', consultant_id: 'other', prospectName: 'Team booking' },
+  ];
+  records.sales_tasks = [
+    { _id: new ObjectId(), dealership: 'BYD South Morang', assignee_id: own, status: 'open', title: 'My follow-up' },
+    { _id: new ObjectId(), dealership: 'BYD South Morang', assignee_id: 'other', status: 'open', title: 'Team follow-up' },
+  ];
+  assert.deepEqual((await request('/leads')).body.data.map(row => row.name), ['Alice']);
+  assert.deepEqual((await request('/appointments?consultantId=other')).body.data.map(row => row.prospectName), ['My booking']);
+  assert.deepEqual((await request('/sales-tasks?status=open')).body.data.map(row => row.title), ['My follow-up']);
+  assert.equal((await request('/team-activity')).status, 403);
+  assert.equal((await request('/inventory/action-items')).body.data.length, 0);
+  assert.equal((await request('/unified/search?q=S1')).body.data.vehicles.length, 0);
+});
+
 test('HTTP login, session expiry and logout enforce authentication', async (t) => {
   const { request, records } = await api(t);
   assert.equal((await request('/leads', { headers: { cookie: '' } })).status, 401);

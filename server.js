@@ -633,6 +633,7 @@ router.get('/appointments', async (req, res) => {
     if (query.when?.$gte && query.when?.$lt && query.when.$gte >= query.when.$lt) invalid('The end date must follow the start date.');
     if (req.query.type && req.query.type !== 'all') query.type = req.query.type;
     if (req.query.consultant && isManager(req.user)) query.consultantName = req.query.consultant;
+    if (req.query.consultantId && isManager(req.user)) query.consultant_id = req.query.consultantId;
     const [data, total] = await Promise.all([
       db.collection('appointments').find(query).sort({ when: 1, _id: 1 }).skip(skip).limit(limit).toArray(),
       db.collection('appointments').countDocuments(query),
@@ -719,7 +720,7 @@ router.get('/unified/search', async (req, res) => {
 
     const regex = new RegExp(escapeRegex(q), 'i');
     const fDb = await getFlwupDb(req);
-    const bDb = await getBooranDb(req);
+    const bDb = req.user.role === 'sales_consultant' ? null : await getBooranDb(req);
 
     const [leads, vehicles, actionItems] = await Promise.all([
       fDb.collection('leads').find({
@@ -731,7 +732,7 @@ router.get('/unified/search', async (req, res) => {
           { vehicle_make: regex },
         ],
       }).limit(10).toArray(),
-      bDb.collection('vehicles').find({
+      bDb ? bDb.collection('vehicles').find({
         $or: [
           { stockNumber: regex },
           { vin: regex },
@@ -740,15 +741,15 @@ router.get('/unified/search', async (req, res) => {
           { variant: regex },
           { rego: regex },
         ],
-      }).limit(10).toArray(),
-      bDb.collection('actionitems').find({
+      }).limit(10).toArray() : [],
+      bDb ? bDb.collection('actionitems').find({
         $or: [
           { vehicleTitle: regex },
           { stockNumber: regex },
           { vin: regex },
           { reason: regex },
         ],
-      }).limit(10).toArray(),
+      }).limit(10).toArray() : [],
     ]);
 
     res.json({
