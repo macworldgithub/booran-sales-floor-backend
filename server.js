@@ -10,6 +10,7 @@ const { installPublicMedia, installCustomerMessages } = require('./lib/customer-
 const mobileMessage = require('./lib/mobilemessage');
 const { createMediaStorage } = require('./lib/mongo-media-storage');
 const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
+const { syncSmsCampaign, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
 const { isManager, canViewCost } = require('./lib/roles');
 const { installPulse, calendarDay } = require('./lib/pulse');
@@ -797,6 +798,28 @@ if (!process.env.VERCEL) {
           const poll = () => app.locals.nextgate.pollLatest().catch(() => console.warn('Nextgate live poll unavailable.'));
           interval(poll, fastInterval);
         }
+      }
+      const campaignDbName = process.env.SMS_CAMPAIGN_DB_NAME?.trim();
+      if (campaignDbName) {
+        let campaignSyncRunning = false;
+        const syncCampaign = async () => {
+          if (campaignSyncRunning) return;
+          campaignSyncRunning = true;
+          try {
+            const target = await database('MONGODB_URI_FLWUP');
+            if (campaignDbName === target.databaseName) throw new Error('Expected a separate SMS Campaign database');
+            const result = await syncSmsCampaign(target, target.client.db(campaignDbName));
+            for (const [source, outcome] of Object.entries(result)) {
+              if (outcome.status === 'rejected') console.warn(`SMS Campaign ${source} sync failed.`);
+            }
+          } catch {
+            console.warn('SMS Campaign lead sync unavailable.');
+          } finally {
+            campaignSyncRunning = false;
+          }
+        };
+        void syncCampaign();
+        interval(syncCampaign, SMS_CAMPAIGN_INTERVAL);
       }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
       interval(checkAlerts, HOUR);

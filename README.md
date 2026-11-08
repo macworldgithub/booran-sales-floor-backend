@@ -86,6 +86,8 @@ Set the corresponding `_URL` and `_TOKEN` values. PPSR and DMS adapters must hon
 
 Use Node.js 22. Run `npm ci`, copy `.env.example` to `.env`, and set `MONGODB_URI_FLWUP` and `MONGODB_URI_BOORAN`. Each URI must include its intended database name. Run `npm start` for the local API on port 5001.
 
+The Booran VPS imports SMS Campaign leads at startup and every minute. The backend reuses its CRM MongoDB connection to read `sms_campaign`, the database configured by the Booran PM2 deployment. For standalone development, set `SMS_CAMPAIGN_DB_NAME=sms_campaign` when using a MongoDB account with access to that source. The sync imports the campaign's latest 500 landing-page enquiries and the verified DealerSocket snapshot for South Morang Hyundai (10876). Both feeds use the same dealership permissions, filters and pagination as other Sales Floor leads. Opportunities without a creation timestamp use the snapshot's observation time. Refreshes update the source metadata and preserve local assignments, contact edits, and diary entries.
+
 To provision the requested accounts, temporarily set `INITIAL_ACCOUNT_PASSWORD` in your shell to the agreed initial password and run `npm run seed:accounts`. Remove that shell variable afterwards. This creates missing accounts without resetting existing passwords or roles.
 
 | Account | Role | Access |

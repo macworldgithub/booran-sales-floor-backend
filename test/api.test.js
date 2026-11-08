@@ -4,6 +4,7 @@ const { createHash } = require('node:crypto');
 const { ObjectId } = require('mongodb');
 const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
+const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
 const read = (record, field) => field.split('.').reduce((value, key) => value?.[key], record);
 
@@ -179,6 +180,48 @@ test('HTTP login, session expiry and logout enforce authentication', async (t) =
   records.sessions.forEach((session) => { session.expiresAt = new Date(0); });
   assert.equal((await request('/auth/me')).status, 401);
 });
+
+test('SMS Campaign enquiries and Hyundai opportunities share the paginated, site-scoped queue', async (t) => {
+  const { request, records, user } = await api(t);
+  const date = '2026-11-06T00:00:00.000Z';
+  const registration = { id: 'registration-1', firstName: 'Campaign', lastName: 'Enquiry', mobile: '0412345678', createdAt: date };
+  const opportunity = { opportunity_id: '102', dealership_id: '10876', rooftop: 'South Morang Hyundai', customer_name: 'Hyundai Customer', opportunity_status: 'Up/Contacted' };
+  const snapshot = { scope: 'south_morang_hyundai', readOnly: true, fetchedAt: date, records: [
+    opportunity, { ...opportunity }, { ...opportunity, opportunity_id: '103', dealership_id: '999' },
+  ] };
+  const target = fixtureDb(records);
+  const source = { collection(name) {
+    if (name === 'leads') return fixtureDb({ leads: [registration] }).collection(name);
+    assert.equal(name, 'settings');
+    return { async findOne(query) { assert.deepEqual(query, { key: 'chrome-snapshot' }); return { value: JSON.stringify(snapshot) }; } };
+  } };
+  const synced = await syncSmsCampaign(target, source);
+  assert.deepEqual(synced, { registrations: { status: 'fulfilled', value: 1 }, opportunities: { status: 'fulfilled', value: 1 } });
+  const site = 'rooftop=South%20Morang%20Hyundai';
+  const page = await request(`/leads?${site}&limit=1&page=2`);
+  assert.equal(page.body.pagination.total, 2);
+  assert.equal(page.body.data.length, 1);
+  const enquiry = (await request(`/leads?${site}&source=SMS%20Campaign&search=Enquiry`)).body.data[0];
+  assert.equal(enquiry.phone, '+61412345678');
+  assert.equal(enquiry.source_channel, 'Campaign landing page');
+  const dealerLead = (await request(`/leads?${site}&source=DealerSocket&status=following_up`)).body.data[0];
+  assert.equal(dealerLead.source_stage, 'Up/Contacted');
+  assert.equal(dealerLead.created_at, date);
+  const assigned = await request(`/leads/${dealerLead.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ assigneeId: String(user._id), expectedOwnerId: null }) });
+  assert.equal(assigned.status, 200);
+  opportunity.opportunity_status = 'Lost';
+  snapshot.records = [opportunity];
+  await syncSmsCampaign(target, source);
+  const after = await request(`/leads?${site}&source=DealerSocket&assignment=assigned`);
+  assert.equal(after.body.pagination.total, 1);
+  assert.equal(after.body.data[0].id, dealerLead.id);
+  assert.equal(after.body.data[0].source_stage, 'Lost');
+  assert.equal(after.body.data[0].status, 'following_up');
+  user.site = 'South Morang Kia';
+  assert.equal((await request(`/leads?${site}&source=DealerSocket`)).body.pagination.total, 0);
+  assert.equal((await request(`/leads/${enquiry.id}`)).status, 404);
+});
+
 test('HTTP filters and pagination scope results and totals to authorised dealerships', async (t) => {
   const { request } = await api(t);
   let result = await request('/leads?limit=1&page=2&sortBy=customer_name&sortOrder=asc');

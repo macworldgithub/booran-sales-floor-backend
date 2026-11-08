@@ -34,6 +34,7 @@ module.exports = {
       ALLOWED_ORIGINS: webOrigins,
       BACKEND_PUBLIC_URL: backendOrigin,
       MEDIA_STORAGE_BACKEND: 'mongodb',
+      SMS_CAMPAIGN_DB_NAME: process.env.SMS_CAMPAIGN_DB_NAME ?? 'sms_campaign',
       AUTO_SYNC_CSV: 'false',
       WATCH_CSV: 'false',
     }, 35000),
