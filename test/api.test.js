@@ -221,6 +221,41 @@ test('daily oversight carries work forward and requires managers to resolve a lo
   assert.ok(records.sales_tasks.every(task => task.status === 'completed'));
 });
 
+test('daily oversight credits pasted Booran video links and still-scheduled next actions', async t => {
+  const { request, records, user } = await api(t);
+  const { shareUrl } = require('../lib/customer-messages');
+  const [linked, scheduled, expired] = records.leads;
+  const now = new Date();
+  const previousDay = new Date(+now - 36 * 3600000).toISOString();
+  for (const lead of [linked, scheduled, expired]) Object.assign(lead, {
+    owner_id: String(user._id), owner_name: user.name, dealership_name: linked.dealership_name,
+    status: 'following_up', created_at: previousDay, last_activity_at: previousDay,
+  });
+  scheduled.next_action = { title: 'Call', recorded_at: previousDay, due_at: new Date(+now + 3600000).toISOString() };
+  expired.next_action = { ...scheduled.next_action, due_at: previousDay };
+  const video = {
+    _id: new ObjectId(), lead_id: String(linked._id), dealership_name: linked.dealership_name,
+    share_token: 'b'.repeat(64), status: 'ready', content_type: 'video/mp4',
+    created_at: previousDay, name: 'walkaround.mp4', views: 3,
+  };
+  records.message_media = [video];
+  records.customer_messages = [linked, expired].map(lead => ({
+    _id: new ObjectId(), lead_id: String(lead._id), dealership_name: lead.dealership_name,
+    status: 'sent', body: `Watch the video: (${shareUrl(video)}).`, created_at: now.toISOString(),
+  }));
+  const response = await request('/daily-oversight?rooftop=BYD%20South%20Morang');
+  assert.equal(response.status, 200);
+  const [person] = response.body.data.members;
+  const rows = new Map(person.leads.map(lead => [lead._id, lead]));
+  assert.equal(rows.get(String(linked._id)).videoSent, true);
+  assert.equal(rows.get(String(linked._id)).actioned, true);
+  assert.equal(rows.get(String(linked._id)).videos[0].views, 3);
+  assert.equal(rows.get(String(scheduled._id)).actioned, true);
+  assert.equal(rows.get(String(scheduled._id)).overdue, true, 'untouched prospects remain visible separately');
+  assert.equal(rows.get(String(expired._id)).actioned, false, 'another lead’s link and an expired action do not count');
+  assert.equal(person.nextActions, 1);
+});
+
 test('external intake keeps the same lead after the phone is revealed and preserves staff edits', async t => {
   const { request } = await api(t);
   const source = '/lead-ingestion/connex';
