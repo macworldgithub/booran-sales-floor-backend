@@ -14,6 +14,10 @@ const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
 const { syncSmsCampaign, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
 const { isManager, canViewCost } = require('./lib/roles');
+const { processVideoJobs } = require('./lib/video-jobs');
+const { installExternalWebhook, installExternalLeads } = require('./lib/external-leads');
+const { installLeadProcess } = require('./lib/lead-process');
+const { installDailyOversight } = require('./lib/daily-oversight');
 const { installPulse, calendarDay } = require('./lib/pulse');
 const { installSalesWorkflows } = require('./lib/sales-workflows');
 const { installSitePresence } = require('./lib/site-presence');
@@ -144,11 +148,15 @@ router.get('/health', async (req, res) => {
 installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 const sweepLeadAlerts = async () => checkAgedLeads(await getFlwupDb());
 installNexgate(router, nextgate, sweepLeadAlerts);
+installExternalWebhook(router, getFlwupDb);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
 installStaffAdmin(router, getFlwupDb, getBooranDb);
 installAllocation(router, getFlwupDb);
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
+installLeadProcess(router, getFlwupDb);
+installDailyOversight(router, getFlwupDb);
+installExternalLeads(router, getFlwupDb);
 installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
 installSitePresence(router, getFlwupDb, storage);
 installLeadAlerts(router, getFlwupDb);
@@ -209,6 +217,7 @@ router.get('/leads/:id', async (req, res) => {
 
 router.post('/leads', async (req, res) => {
   try {
+    if (req.body.status === 'lost') invalid('Submit a loss reason for manager review instead of closing this lead.');
     const newLead = createLead(req.body, req.user);
     newLead.business_id = businessId(newLead.dealership_name, newLead.business_name);
     if (!isManager(req.user) && req.user.role !== 'sales_consultant') return res.sendStatus(403);
@@ -236,7 +245,16 @@ router.patch('/leads/:id', async (req, res) => {
       query = { deal_id: id };
     }
 
+    if (req.body.status === 'lost') invalid('Submit a loss reason for manager review instead of closing this lead.');
+    const existingLead = await db.collection('leads').findOne(query);
+    if (!existingLead) return res.status(404).json({ success: false, error: 'Lead not found.' });
+    if (existingLead.loss_review?.status === 'pending' && req.body.status && req.body.status !== existingLead.status) invalid('Resolve the pending loss review before changing the lead stage.');
     const updateDoc = leadUpdate(req.body, req.user);
+    updateDoc.$set.last_activity_at = new Date().toISOString();
+    if (req.body.status && req.body.status !== existingLead.status) {
+      query = { ...query, status: existingLead.status, 'loss_review.status': { $ne: 'pending' } };
+      updateDoc.$inc = { process_revision: 1 };
+    }
     if (Object.hasOwn(updateDoc.$set, 'business_name')) {
       const lead = await db.collection('leads').findOne(query);
       if (!lead) return res.status(404).json({ success: false, error: 'Lead not found.' });
@@ -824,6 +842,7 @@ if (!process.env.VERCEL) {
         void syncCampaign();
         interval(syncCampaign, SMS_CAMPAIGN_INTERVAL);
       }
+      interval(() => database('MONGODB_URI_FLWUP').then(db => processVideoJobs(db, createMediaStorage(async () => db))).catch(() => console.warn('Video queue unavailable.')), 5000);
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
       interval(checkAlerts, HOUR);
 

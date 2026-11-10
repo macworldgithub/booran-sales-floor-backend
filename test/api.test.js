@@ -69,7 +69,7 @@ function matches(record, query) {
           case '$gte': return actual >= expected;
           case '$lt': return actual < expected;
           case '$lte': return actual <= expected;
-          case '$ne': return !equal(actual, expected);
+          case '$ne': return !equal(actual, expected) && !(Array.isArray(actual) && actual.some(item => equal(item, expected)));
           case '$in': return expected.some((item) => equal(actual, item));
           case '$nin': return expected.every((item) => !equal(actual, item));
           default: throw new Error(`Unimplemented fixture operator ${operator}`);
@@ -126,7 +126,12 @@ function fixtureDb(records) {
         let row = rows.find((item) => matches(item, query));
         if (!row && options.upsert) { row = { ...query, ...update.$setOnInsert }; rows.push(row); }
         if (!row) return null;
-        Object.assign(row, update.$set);
+        for (const [key, value] of Object.entries(update.$set || {})) {
+          const [field, child] = key.split('.');
+          if (child) (row[field] ||= {})[child] = value;
+          else row[field] = value;
+        }
+        for (const [key, value] of Object.entries(update.$addToSet || {})) row[key] = [...new Set([...(row[key] || []), ...(value.$each || [value])])];
         for (const key of Object.keys(update.$unset || {})) delete row[key];
         for (const [key, value] of Object.entries(update.$inc || {})) row[key] = (row[key] || 0) + value;
         for (const [key, value] of Object.entries(update.$push || {})) (row[key] ||= []).push(value);
@@ -172,6 +177,102 @@ async function api(t, services = {}) {
   }
   return { request, records, user, token, hooks, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
 }
+
+test('daily oversight carries work forward and requires managers to resolve a loss request', async t => {
+  const { request, records } = await api(t);
+  const site = 'BYD South Morang';
+  const consultant = { _id: new ObjectId(), name: 'Consultant', email: 'consultant@example.com', role: 'sales_consultant', active: true, site };
+  const consultantToken = 'b'.repeat(64);
+  const headers = { authorization: `Bearer ${consultantToken}` };
+  records.users.push(consultant);
+  records.sessions.push({ _id: createHash('sha256').update(consultantToken).digest('hex'), userId: consultant._id, expiresAt: new Date(Date.now() + 60000) });
+  const post = (path, body, options = {}) => request(path, { method: 'POST', body: JSON.stringify(body), ...options });
+  const created = await post('/prospects', { dealership: site, quick_walk_in: true, notes: 'Red hat' });
+  assert.equal(created.status, 201);
+  const id = created.body.data._id;
+  assert.equal(created.body.data.owner_id, null);
+  assert.equal(created.body.data.diary_entries[0].note, 'Red hat');
+  const dashboard = '/daily-oversight?rooftop=BYD%20South%20Morang';
+  assert.ok((await request(dashboard)).body.data.unassigned.some(lead => lead._id === id));
+  assert.equal((await request(`/leads/${id}/assignment`, { method: 'PATCH', body: JSON.stringify({ assigneeId: String(consultant._id), expectedOwnerId: null }) })).status, 200);
+  const record = records.leads.find(lead => String(lead._id) === id);
+  const yesterday = new Date(Date.now() - 86400000).toISOString();
+  Object.assign(record, { created_at: yesterday, assigned_at: new Date(yesterday), last_activity_at: yesterday });
+  records.sales_tasks = [{ _id: new ObjectId(), dealership: site, lead_id: id, assignee_id: String(consultant._id), status: 'open', due_at: yesterday }];
+  const myDay = (await request(dashboard, { headers })).body.data;
+  assert.equal(myDay.members.length, 1);
+  assert.equal(myDay.summary.overdueProspects, 1);
+  assert.equal(myDay.summary.carryOvers, 1);
+  assert.equal(myDay.members[0].expected, 0, 'carry-overs do not inflate today’s video denominator');
+  assert.deepEqual(myDay.unassigned, []);
+  const leadPath = `/leads/${id}`;
+  assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() + 3 * 86400000).toISOString() }, { headers })).status, 400);
+  assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() + 3600000).toISOString() }, { headers })).status, 200);
+  assert.equal((await request(dashboard)).body.data.members[0].leads[0].actioned, true);
+  assert.equal((await post(`${leadPath}/loss-request`, { reason: ' ' }, { headers })).status, 400);
+  const loss = (await post(`${leadPath}/loss-request`, { reason: 'Customer declined' }, { headers })).body.data;
+  assert.equal(loss.status, 'following_up');
+  assert.equal((await request(dashboard)).body.data.losses[0]._id, id);
+  const decision = { action: 'approve', reviewId: loss.loss_review.id };
+  assert.equal((await post(`${leadPath}/loss-review`, decision, { headers })).status, 403);
+  assert.equal((await post(`${leadPath}/loss-review`, decision)).body.data.status, 'lost');
+  assert.equal((await post(`${leadPath}/loss-review`, decision)).status, 409);
+  assert.equal((await request(dashboard)).body.data.losses.length, 0);
+  assert.ok(records.sales_tasks.every(task => task.status === 'completed'));
+});
+
+test('external intake keeps the same lead after the phone is revealed and preserves staff edits', async t => {
+  const { request } = await api(t);
+  const source = '/lead-ingestion/connex';
+  const send = data => request(source, { method: 'POST', body: JSON.stringify(data) });
+  const payload = { externalId: 'connex-123', dealership: 'BYD South Morang', name: 'Provider name', vehicle: 'Tucson' };
+  const first = await send(payload);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.data.owner_id, null);
+  const id = first.body.data._id;
+  assert.equal((await request(`/leads/${id}`, { method: 'PATCH', body: JSON.stringify({ customer_name: 'Verified name' }) })).status, 200);
+  const revealed = await send({ ...payload, phone: '0412 345 678', opportunityStatus: 'Sales Qualified' });
+  assert.equal(revealed.body.data._id, id);
+  assert.equal(revealed.body.data.name, 'Verified name');
+  assert.equal(revealed.body.data.phone, '+61412345678');
+  const replay = await send(payload);
+  assert.equal(replay.body.data.external.details_revealed, true);
+  assert.equal(replay.body.data.external.opportunity_status, 'Sales Qualified');
+  assert.equal((await send({ ...payload, dealership: 'Booran Cheltenham' })).status, 403);
+});
+
+test('recorded videos remain private during branding and count each viewer event once per session', async t => {
+  const settings = { VIDEO_BRANDING_JSON: JSON.stringify({ 'South Morang Hyundai': { name: 'South Morang Hyundai', phone: '03 5550 0100', email: 'sales@example.test' } }) };
+  for (const [key, value] of Object.entries(settings)) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+  const storage = { ...require('../lib/media-storage'), prepare: async () => ({ chunk_size: 100 }), complete: async () => {} };
+  const { request, records, baseUrl } = await api(t, { storage });
+  const lead = records.leads[0];
+  lead.dealership_name = 'South Morang Hyundai';
+  const path = `/leads/${lead._id}/media`;
+  const prepared = await request(path, { method: 'POST', body: JSON.stringify({ recorded: true, name: 'walkaround.mp4', content_type: 'video/mp4', size: 100 }) });
+  assert.equal(prepared.status, 201);
+  const media = records.message_media[0];
+  const url = `${baseUrl}/media/${media.share_token}`;
+  const completed = await request(`${path}/${media._id}/complete`, { method: 'POST', body: '{}' });
+  assert.equal(completed.body.data.status, 'processing');
+  assert.equal(completed.body.data.url, '');
+  assert.equal((await fetch(url)).status, 404);
+  assert.equal((await request(path)).body.data.length, 0);
+  assert.equal((await request(`${path}?includeProcessing=true`)).body.data.length, 1);
+  // Exercise the recipient endpoints after the worker publishes the recording.
+  media.status = 'ready';
+  assert.equal((await fetch(url)).status, 200);
+  const event = (type) => fetch(`${url}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: type, session: '5bc002f4-382e-4a72-9368-713b6f88455b' }) });
+  for (const type of ['view', 'view', 'review']) assert.equal((await event(type)).status, 200);
+  const item = (await request(path)).body.data[0];
+  assert.equal(item.views, 1);
+  assert.equal(item.reviews, 1);
+});
 test('staff administration requires a super admin and applies saved site access to existing sessions', async (t) => {
   const { request, records, user } = await api(t);
   records.rooftops = [{ name: 'South Morang Kia' }, { name: 'Booran Cheltenham' }];
