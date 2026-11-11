@@ -40,6 +40,12 @@ test('name and local/international mobile searches find the same scoped customer
   }
   records.leads[2].customer_phone = records.leads[0].customer_phone;
   assert.equal((await request('/leads?search=0409002310')).body.data.length, 1);
+  records.leads[0].customer_name = 'Angel Pokora';
+  records.leads[0].customer_name_aliases = ['Angela Pokora'];
+  for (const search of ['Angel Pokora', 'Angela Pokora']) {
+    assert.deepEqual((await request('/unified/search?q=' + encodeURIComponent(search))).body.data.leads.map(row => row.id), [String(records.leads[0]._id)]);
+    assert.deepEqual((await request('/leads?search=' + encodeURIComponent(search))).body.data.map(row => row.id), [String(records.leads[0]._id)]);
+  }
 });
 
 test('duplicate mobiles block create and edit, escalate to managers and do not expose another salesperson customer', async t => {
