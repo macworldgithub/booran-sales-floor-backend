@@ -203,7 +203,7 @@ test('daily oversight carries work forward and requires managers to resolve a lo
   assert.equal(myDay.members.length, 1);
   assert.equal(myDay.summary.overdueProspects, 1);
   assert.equal(myDay.summary.carryOvers, 1);
-  assert.equal(myDay.members[0].expected, 0, 'carry-overs do not inflate today’s video denominator');
+  assert.equal(myDay.members[0].expected, 1, 'active carry-over prospects remain in the video denominator');
   assert.deepEqual(myDay.unassigned, []);
   const leadPath = `/leads/${id}`;
   assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() + 3 * 86400000).toISOString() }, { headers })).status, 400);
@@ -436,9 +436,68 @@ test('SMS Campaign enquiries and Hyundai opportunities share the paginated, site
   assert.equal(after.body.data[0].id, dealerLead.id);
   assert.equal(after.body.data[0].source_stage, 'Lost');
   assert.equal(after.body.data[0].status, 'following_up');
+  assert.equal((await request(`/daily-oversight?${site}`)).body.data.dealerSocket, null,
+    'an opportunity closed in the source no longer counts as an active DealerSocket prospect');
   user.site = 'South Morang Kia';
   assert.equal((await request(`/leads?${site}&source=DealerSocket`)).body.pagination.total, 0);
   assert.equal((await request(`/leads/${enquiry.id}`)).status, 404);
+});
+
+test('DealerSocket owners populate scoped staff rows and preserve manager allocations on replay', async t => {
+  const { request, records } = await api(t);
+  const site = 'South Morang Hyundai';
+  const staff = [
+    { name: 'Isaac Bugeja', role: 'sales_consultant', site },
+    { name: 'Kris Liberi', role: 'sales_consultant', site },
+    { name: 'Quoc Truong', role: 'sales_manager', site },
+    { name: 'George Simogiannis', role: 'sales_consultant', site: 'South Morang Kia' },
+    { name: 'First Smith', role: 'sales_consultant', site },
+    { name: 'Second Smith', role: 'sales_consultant', site },
+  ].map(person => ({ ...person, _id: new ObjectId(), active: true }));
+  records.users.push(...staff);
+  const owners = ['Bugeja', 'Libreri', 'Truong', 'Simogiannis', 'Smith', 'Carsales Webleads', 'Bugeja'];
+  const snapshot = { scope: 'south_morang_hyundai', readOnly: true, fetchedAt: '2026-11-06T01:00:00Z',
+    records: owners.map((owner, index) => ({ opportunity_id: String(index + 1), dealership_id: '10876',
+      rooftop: site, customer_name: `Imported ${index}`, assigned_salesperson: owner,
+      opportunity_status: index === 6 ? 'Lost' : 'Up/Contacted' })) };
+  const source = { collection(name) {
+    return name === 'leads' ? fixtureDb({ leads: [] }).collection(name) : { findOne: async () => ({ value: JSON.stringify(snapshot) }) };
+  } };
+  const target = { ...fixtureDb(records), client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) } };
+  const outcome = await syncSmsCampaign(target, source);
+  assert.equal(outcome.opportunities.status, 'fulfilled', outcome.opportunities.reason?.message);
+  const imported = records.leads.filter(lead => lead.source === 'DealerSocket');
+  const byName = new Map(imported.map(lead => [lead.customer_name, lead]));
+  assert.equal(byName.get('Imported 0').owner_id, String(staff[0]._id));
+  assert.equal(byName.get('Imported 1').owner_id, String(staff[1]._id));
+  assert.equal(byName.get('Imported 2').owner_id, String(staff[2]._id));
+  for (const index of [3, 4, 5, 6]) assert.equal(byName.get(`Imported ${index}`).owner_id, undefined);
+  const dashboard = (await request('/daily-oversight?rooftop=South%20Morang%20Hyundai')).body.data;
+  assert.equal(dashboard.summary.activeProspects, 6);
+  assert.equal(dashboard.dealerSocket.active, 6);
+  assert.equal(dashboard.dealerSocket.assigned, 3);
+  assert.equal(dashboard.dealerSocket.snapshotAt, snapshot.fetchedAt);
+  assert.ok(dashboard.members.some(person => person.name === 'Quoc Truong' && person.activeProspects === 1));
+  assert.equal(dashboard.unassigned.length, 3, 'ambiguous, other-site and source bucket owners stay in the allocation queue');
+
+  const first = byName.get('Imported 0');
+  const second = byName.get('Imported 1');
+  const assigned = await request(`/leads/${first._id}/assignment`, { method: 'PATCH',
+    body: JSON.stringify({ assigneeId: String(staff[1]._id), expectedOwnerId: first.owner_id }) });
+  assert.equal(assigned.status, 200);
+  second.diary_entries.push({ author: 'Salesperson', note: 'Keep this note', date: new Date().toISOString() });
+  records.sales_tasks = [{ _id: new ObjectId(), dealership: site, lead_id: String(second._id),
+    status: 'open', assignee_id: String(staff[1]._id) }];
+  snapshot.records[0].assigned_salesperson = 'Truong';
+  snapshot.records[1].assigned_salesperson = 'Bugeja';
+  await syncSmsCampaign(target, source);
+  assert.equal(first.owner_id, String(staff[1]._id), 'a manager allocation survives subsequent DealerSocket changes');
+  assert.equal(second.owner_id, String(staff[0]._id), 'source-owned assignments follow the current source owner');
+  assert.equal(records.sales_tasks[0].assignee_id, String(staff[0]._id));
+  const entries = second.diary_entries.length;
+  await syncSmsCampaign(target, source);
+  assert.equal(second.diary_entries.length, entries, 'replays do not duplicate assignment notes');
+  assert.ok(second.diary_entries.some(entry => entry.note === 'Keep this note'));
 });
 
 test('HTTP filters and pagination scope results and totals to authorised dealerships', async (t) => {
