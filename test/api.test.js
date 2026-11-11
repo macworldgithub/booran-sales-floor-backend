@@ -106,14 +106,23 @@ function fixtureDb(records) {
       async deleteOne(query) { const i = rows.findIndex((row) => matches(row, query)); if (i >= 0) rows.splice(i, 1); },
       async updateMany(query, update) {
         const matchesQuery = rows.filter(row => matches(row, query));
-        for (const row of matchesQuery) Object.assign(row, update.$set);
+        for (const row of matchesQuery) {
+          for (const [key, value] of Object.entries(update.$set)) {
+            const [field, child] = key.split('.');
+            if (child) (row[field] ||= {})[child] = value;
+            else row[field] = value;
+          }
+        }
         return { modifiedCount: matchesQuery.length };
       },
       async bulkWrite(operations) {
         let upsertedCount = 0;
-        for (const { updateOne: { filter, update } } of operations) {
+        for (const { updateOne: { filter, update, upsert } } of operations) {
           let row = rows.find(candidate => matches(candidate, filter));
-          if (!row) { row = { ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++; }
+          if (!row) {
+            if (!upsert) continue;
+            row = { ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++;
+          }
           for (const [key, value] of Object.entries(update.$set)) {
             const [field, child] = key.split('.');
             if (child) (row[field] ||= {})[child] = value;
@@ -411,6 +420,7 @@ test('SMS Campaign enquiries and Hyundai opportunities share the paginated, site
   const target = fixtureDb(records);
   const source = { collection(name) {
     if (name === 'leads') return fixtureDb({ leads: [registration] }).collection(name);
+    if (name === 'south_morang_prospects') return fixtureDb({}).collection(name);
     assert.equal(name, 'settings');
     return { async findOne(query) { assert.deepEqual(query, { key: 'chrome-snapshot' }); return { value: JSON.stringify(snapshot) }; } };
   } };
@@ -461,7 +471,7 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
       rooftop: site, customer_name: `Imported ${index}`, assigned_salesperson: owner,
       opportunity_status: index === 6 ? 'Lost' : 'Up/Contacted' })) };
   const source = { collection(name) {
-    return name === 'leads' ? fixtureDb({ leads: [] }).collection(name) : { findOne: async () => ({ value: JSON.stringify(snapshot) }) };
+    return ['leads', 'south_morang_prospects'].includes(name) ? fixtureDb({}).collection(name) : { findOne: async () => ({ value: JSON.stringify(snapshot) }) };
   } };
   const target = { ...fixtureDb(records), client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) } };
   const outcome = await syncSmsCampaign(target, source);
@@ -498,6 +508,65 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
   await syncSmsCampaign(target, source);
   assert.equal(second.diary_entries.length, entries, 'replays do not duplicate assignment notes');
   assert.ok(second.diary_entries.some(entry => entry.note === 'Keep this note'));
+});
+
+test('the current South Morang collection replaces stale snapshot counts across the correct dealerships', async t => {
+  const { request, records } = await api(t);
+  records.users.push({ _id: new ObjectId(), name: 'Isaac Bugeja', role: 'sales_consultant', site: 'South Morang Hyundai', active: true });
+  const snapshot = { scope: 'south_morang_hyundai', readOnly: true, fetchedAt: '2026-11-06T01:00:00Z',
+    records: ['101', '201', '103'].map(id => ({ opportunity_id: id, dealership_id: '10876', rooftop: 'South Morang Hyundai',
+      customer_name: 'Previous name', opportunity_status: id === '103' ? 'Lost' : 'Up/Contacted', assigned_salesperson: 'Bugeja' })) };
+  const sourceRows = { settings: [{ key: 'chrome-snapshot', value: JSON.stringify(snapshot) }] };
+  const source = fixtureDb(sourceRows);
+  const target = { ...fixtureDb(records), client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) } };
+  assert.equal((await syncSmsCampaign(target, source)).opportunities.status, 'fulfilled');
+  const existing = records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10876-101');
+  const previous = records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10876-201');
+  previous.diary_entries.push({ author: 'Manager', note: 'Keep historical notes' });
+  const capturedAt = '2026-11-11T09:08:00.063Z';
+  sourceRows.south_morang_prospects = [
+    { id: '101', contactId: 'c1', site: '10876', franchise: 'South Morang Hyundai', name: 'Alice Updated',
+      status: 'Up/Contacted', assignee: 'Bugeja', vehicle: 'Hyundai Tucson', capturedAt },
+    { id: '103', site: '10876', franchise: 'South Morang Hyundai Used Cars', name: 'Used customer', status: 'Up/Contacted', capturedAt },
+    { id: '101', contactId: 'c1', site: '10755', franchise: 'South Morang Kia Used Cars', name: 'Different customer', status: 'Up/Contacted', assignee: 'Bugeja', capturedAt },
+    { id: '104', site: '10755', franchise: 'Chery South Morang', name: 'Chery customer', status: 'Worksheet', capturedAt },
+    { id: '999', site: '999', franchise: 'South Morang Hyundai', name: 'Other dealership', status: 'Unqualified', capturedAt },
+  ];
+  sourceRows.contacts = [{ dealerSocketContactId: 'c1', firstName: 'Alice', lastName: 'Updated', mobile: '0412345678' }];
+  const imported = await syncSmsCampaign(target, source);
+  assert.equal(imported.opportunities.status, 'fulfilled', imported.opportunities.reason?.message);
+  assert.equal(imported.opportunities.value, 4);
+  assert.equal(existing.customer_name, 'Alice Updated');
+  assert.equal(existing.customer_phone, '+61412345678');
+  assert.equal(existing.vehicle_model, 'Hyundai Tucson');
+  assert.equal(records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10876-103').status, 'following_up',
+    'an unedited source status follows the current feed when a prospect becomes active again');
+  assert.equal(previous.sms_campaign.active, false);
+  assert.equal(previous.diary_entries.at(-1).note, 'Keep historical notes');
+  const kia = records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10755-101');
+  assert.equal(kia.dealership_name, 'South Morang Kia');
+  assert.equal(kia.customer_phone, '', 'a contact ID with a different customer name cannot supply a phone number');
+  assert.equal(kia.owner_id, undefined, 'a Hyundai-only account cannot receive a Kia prospect');
+  assert.equal(records.leads.filter(lead => lead.deal_id === 'DEALERSOCKET-10876-101').length, 1, 'the prior opportunity keeps its identity');
+  const dashboard = (await request('/daily-oversight?rooftop=South%20Morang')).body.data;
+  assert.equal(dashboard.dealerSocket.active, 4);
+  assert.equal(dashboard.dealerSocket.snapshotAt, capturedAt);
+  assert.ok(dashboard.members.every(person => person.leads.every(lead => lead._id !== String(previous._id))),
+    'retired source records do not appear as current prospects just because they were assigned today');
+  assert.equal((await request('/daily-oversight?rooftop=South%20Morang%20Hyundai')).body.data.dealerSocket.active, 2);
+  assert.equal((await request('/leads?dealership=South%20Morang%20Hyundai&status=following_up')).body.pagination.total, 2);
+  assert.equal((await request('/unified/summary?rooftop=South%20Morang%20Hyundai')).body.data.crm.totalLeads, 2);
+  existing.customer_phone = '+61400000000';
+  existing.booran_edited_fields = ['customer_phone'];
+  kia.status = 'lost';
+  kia.booran_edited_fields = ['status'];
+  sourceRows.contacts[0].mobile = '0433333333';
+  await syncSmsCampaign(target, source);
+  assert.equal(existing.customer_phone, '+61400000000', 'local contact edits survive source refresh');
+  assert.equal(kia.status, 'lost', 'a locally reviewed outcome survives source refresh');
+  sourceRows.south_morang_prospects = [];
+  assert.equal((await syncSmsCampaign(target, source)).opportunities.status, 'rejected', 'an empty new feed cannot resurrect the older snapshot');
+  assert.equal(previous.sms_campaign.active, false);
 });
 
 test('HTTP filters and pagination scope results and totals to authorised dealerships', async (t) => {

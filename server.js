@@ -11,7 +11,7 @@ const { installPublicMedia, installCustomerMessages } = require('./lib/customer-
 const mobileMessage = require('./lib/mobilemessage');
 const { createMediaStorage } = require('./lib/mongo-media-storage');
 const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
-const { syncSmsCampaign, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
+const { syncSmsCampaign, resolveSmsCampaignDatabase, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
 const { isManager, canViewCost } = require('./lib/roles');
 const { processVideoJobs } = require('./lib/video-jobs');
@@ -696,9 +696,9 @@ router.get('/unified/summary', async (req, res) => {
       aging90Count,
       actionItemsCount,
     ] = await Promise.all([
-      fDb.collection('leads').countDocuments(),
-      fDb.collection('leads').countDocuments({ status: 'following_up' }),
-      fDb.collection('leads').countDocuments({ status: 'new_lead' }),
+      fDb.collection('leads').countDocuments({ 'sms_campaign.active': { $ne: false } }),
+      fDb.collection('leads').countDocuments({ status: 'following_up', 'sms_campaign.active': { $ne: false } }),
+      fDb.collection('leads').countDocuments({ status: 'new_lead', 'sms_campaign.active': { $ne: false } }),
       bDb.collection('vehicles').countDocuments(),
       bDb.collection('vehicles').countDocuments({ agingBucket: '90+' }),
       bDb.collection('actionitems').countDocuments({ status: 'open' }),
@@ -820,16 +820,15 @@ if (!process.env.VERCEL) {
           interval(poll, fastInterval);
         }
       }
-      const campaignDbName = process.env.SMS_CAMPAIGN_DB_NAME?.trim();
-      if (campaignDbName) {
+      if (process.env.MONGODB_URI_SMS_CAMPAIGN?.trim() || process.env.SMS_CAMPAIGN_DB_NAME?.trim()) {
         let campaignSyncRunning = false;
         const syncCampaign = async () => {
           if (campaignSyncRunning) return;
           campaignSyncRunning = true;
           try {
             const target = await database('MONGODB_URI_FLWUP');
-            if (campaignDbName === target.databaseName) throw new Error('Expected a separate SMS Campaign database');
-            const result = await syncSmsCampaign(target, target.client.db(campaignDbName));
+            const source = await resolveSmsCampaignDatabase(target, database);
+            const result = await syncSmsCampaign(target, source);
             for (const [source, outcome] of Object.entries(result)) {
               if (outcome.status === 'rejected') console.warn(`SMS Campaign ${source} sync failed.`);
             }
