@@ -8,6 +8,28 @@ const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
 const read = (record, field) => field.split('.').reduce((value, key) => Array.isArray(value) ? value.flatMap(item => item?.[key] === undefined ? [] : item[key]) : value?.[key], record);
 
+test('co-located integration state keeps logical ID namespaces, scoped manager reads and Nextgate checkpoints separate', async () => {
+  const { withLeadState } = require('../lib/lead-state');
+  const { scopedDatabase } = require('../lib/access');
+  const records = { nexgate_sync: [{ _id: 'seller-checkpoint', last_success: new Date() }] };
+  const db = withLeadState(fixtureDb(records), 'nexgate_sync');
+  const site = 'South Morang Hyundai';
+  for (const kind of ['lead_mobile_keys', 'lead_merge_requests', 'lead_source_links', 'lead_email_receipts', 'integration_sync']) {
+    await db.collection(kind).findOneAndUpdate({ _id: 'shared-key' }, { $set: { dealership: site, status: 'open' } }, { upsert: true });
+    assert.equal((await db.collection(kind).findOne({ _id: 'shared-key' }))._id, 'shared-key');
+    assert.equal(await db.collection(kind).countDocuments({}), 1);
+  }
+  assert.equal(records.nexgate_sync.length, 6);
+  const scoped = scopedDatabase(db, { id: 'manager', role: 'manager', site });
+  assert.equal((await scoped.collection('lead_merge_requests').find({}).sort({ _id: 1 }).limit(5).toArray()).length, 1);
+  const denied = scopedDatabase(db, { id: 'manager', role: 'manager', site: 'South Morang Kia' });
+  assert.equal(await denied.collection('lead_merge_requests').countDocuments({}), 0);
+  await db.collection('lead_source_links').updateMany({ _id: { $in: ['shared-key'] } }, { $set: { lead_id: 'primary' } });
+  assert.equal((await db.collection('lead_source_links').findOne({ _id: 'shared-key' })).lead_id, 'primary');
+  assert.equal(records.nexgate_sync[0]._id, 'seller-checkpoint');
+  assert.equal(records.nexgate_sync[0].lead_id, undefined);
+});
+
 test('name and local/international mobile searches find the same scoped customer in both search entry points', async t => {
   const { request, records } = await api(t);
   records.leads[0].customer_name = 'Angela   Pokora';

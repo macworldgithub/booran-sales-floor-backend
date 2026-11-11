@@ -3,6 +3,7 @@ const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
 const { text, escapeRegex, pageQuery, leadQuery, vehicleQuery, actionQuery, isAllLocations } = require('./lib/query');
 const { scopedDatabase } = require('./lib/access');
+const { withLeadState } = require('./lib/lead-state');
 const { installAuth } = require('./lib/auth');
 const { installStaffAdmin } = require('./lib/staff-admin');
 const { invalid, dealership, serializeLead, LEAD_PROJECTION, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
@@ -44,7 +45,7 @@ async function database(envKey) {
       compressors: ['zlib'], zlibCompressionLevel: 3,
     });
     clients.add(client);
-    const pending = client.connect().then(() => client.db()).catch(async (error) => {
+    const pending = client.connect().then(() => envKey === 'MONGODB_URI_FLWUP' ? withLeadState(client.db()) : client.db()).catch(async (error) => {
       connections.delete(envKey);
       clients.delete(client);
       await client.close().catch(() => {});

@@ -22,7 +22,7 @@ async function main() {
 
   const client = new MongoClient(uri);
   await client.connect();
-  const db = client.db('flwup_crm');
+  const db = require('../lib/lead-state').withLeadState(client.db('flwup_crm'));
 
   try {
     const result = await syncFlwupLeads(db);

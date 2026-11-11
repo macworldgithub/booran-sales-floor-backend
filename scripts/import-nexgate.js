@@ -33,7 +33,7 @@ async function main() {
   if (!snapshot) loadLocalNexgateEnvironment();
   const client = new MongoClient(process.env.MONGODB_URI_FLWUP, { serverSelectionTimeoutMS: 10000 });
   try {
-    const db = (await client.connect()).db();
+    const db = require('../lib/lead-state').withLeadState((await client.connect()).db());
     if (snapshot) {
       for (const dealer of snapshot.dealerships) {
         console.log(dealer.sellerIdentifier, await importCustomers(db, dealer.sellerIdentifier, dealer.customers));
