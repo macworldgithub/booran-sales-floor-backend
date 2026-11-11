@@ -5,7 +5,7 @@ const { text, escapeRegex, pageQuery, leadQuery, vehicleQuery, actionQuery, isAl
 const { scopedDatabase } = require('./lib/access');
 const { installAuth } = require('./lib/auth');
 const { installStaffAdmin } = require('./lib/staff-admin');
-const { invalid, dealership, serializeLead, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
+const { invalid, dealership, serializeLead, LEAD_PROJECTION, createLead, leadUpdate, actionUpdate, appointmentInput, dateBoundary } = require('./lib/records');
 const { releaseHold, visibleVehicle, visibleAction } = require('./lib/vehicle-holds');
 const { installPublicMedia, installCustomerMessages } = require('./lib/customer-messages');
 const mobileMessage = require('./lib/mobilemessage');
@@ -38,6 +38,7 @@ async function database(envKey) {
     const client = new MongoClient(uri, {
       maxPoolSize: process.env.VERCEL ? 5 : 20,
       maxIdleTimeMS: 60000, waitQueueTimeoutMS: 5000, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000,
+      compressors: ['zlib'], zlibCompressionLevel: 3,
     });
     clients.add(client);
     const pending = client.connect().then(() => client.db()).catch(async (error) => {
@@ -171,7 +172,7 @@ router.get('/leads', async (req, res) => {
     const query = leadQuery(req.query);
 
     const [leads, total] = await Promise.all([
-      db.collection('leads').find(query).sort(sortOptions).skip(skip).limit(limit).toArray(),
+      db.collection('leads').find(query, { projection: LEAD_PROJECTION }).sort(sortOptions).skip(skip).limit(limit).toArray(),
       db.collection('leads').countDocuments(query),
     ]);
 
@@ -204,7 +205,7 @@ router.get('/leads/:id', async (req, res) => {
       query = { deal_id: id };
     }
 
-    const lead = await db.collection('leads').findOne(query);
+    const lead = await db.collection('leads').findOne(query, { projection: LEAD_PROJECTION });
     if (!lead) {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
@@ -280,11 +281,15 @@ router.patch('/leads/:id', async (req, res) => {
 router.get('/crm/stats', async (req, res) => {
   try {
     const db = await getFlwupDb(req);
-    const [total, statusBreakdown, rooftopBreakdown] = await Promise.all([
-      db.collection('leads').countDocuments(),
-      db.collection('leads').aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).toArray(),
-      db.collection('leads').aggregate([{ $group: { _id: '$dealership_name', count: { $sum: 1 } } }]).toArray(),
-    ]);
+    const [stats] = await db.collection('leads').aggregate([
+      { $facet: {
+        statuses: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+        rooftops: [{ $group: { _id: '$dealership_name', count: { $sum: 1 } } }],
+      } },
+    ]).toArray();
+    const statusBreakdown = stats?.statuses || [];
+    const rooftopBreakdown = stats?.rooftops || [];
+    const total = statusBreakdown.reduce((sum, row) => sum + row.count, 0);
 
     const statusCounts = Object.create(null);
     statusBreakdown.forEach((s) => {
@@ -567,33 +572,23 @@ router.post('/leads/sync-flwup', async (req, res) => {
 router.get('/inventory/stats', async (req, res) => {
   try {
     const db = await getBooranDb(req);
-    const [
-      totalVehicles,
-      agingBucketsAgg,
-      categoriesAgg,
-      totalActionItems,
-      actionTypeAgg,
-      costAgg,
-    ] = await Promise.all([
-      db.collection('vehicles').countDocuments(),
-      db.collection('vehicles').aggregate([{ $group: { _id: '$agingBucket', count: { $sum: 1 } } }]).toArray(),
-      db.collection('vehicles').aggregate([{ $group: { _id: '$category', count: { $sum: 1 } } }]).toArray(),
-      db.collection('actionitems').countDocuments({ status: 'open' }),
+    const [vehicleStats, actionTypeAgg] = await Promise.all([
+      db.collection('vehicles').aggregate([{ $facet: {
+        aging: [{ $group: { _id: '$agingBucket', count: { $sum: 1 } } }],
+        categories: [{ $group: { _id: '$category', count: { $sum: 1 } } }],
+        totals: [{ $group: { _id: null, totalVehicles: { $sum: 1 },
+          totalStockCost: { $sum: '$totalStockCost' }, totalHoldingCost: { $sum: '$accumulatedHoldingCost' },
+          avgDaysInStock: { $avg: '$daysInStock' } } }],
+      } }]).toArray(),
       db.collection('actionitems').aggregate([
-        { $match: { status: 'open' } },
-        { $group: { _id: '$actionType', count: { $sum: 1 } } },
-      ]).toArray(),
-      db.collection('vehicles').aggregate([
-        {
-          $group: {
-            _id: null,
-            totalStockCost: { $sum: '$totalStockCost' },
-            totalHoldingCost: { $sum: '$accumulatedHoldingCost' },
-            avgDaysInStock: { $avg: '$daysInStock' },
-          },
-        },
+        { $match: { status: 'open' } }, { $group: { _id: '$actionType', count: { $sum: 1 } } },
       ]).toArray(),
     ]);
+    const agingBucketsAgg = vehicleStats[0]?.aging || [];
+    const categoriesAgg = vehicleStats[0]?.categories || [];
+    const totals = vehicleStats[0]?.totals?.[0] || { totalVehicles: 0, totalStockCost: 0, totalHoldingCost: 0, avgDaysInStock: 0 };
+    const totalVehicles = totals.totalVehicles;
+    const totalActionItems = actionTypeAgg.reduce((sum, row) => sum + row.count, 0);
 
     const agingBuckets = Object.create(null);
     agingBucketsAgg.forEach((b) => {
@@ -610,8 +605,6 @@ router.get('/inventory/stats', async (req, res) => {
     actionTypeAgg.forEach((a) => {
       actionTypes[a._id || 'unknown'] = a.count;
     });
-
-    const totals = costAgg[0] || { totalStockCost: 0, totalHoldingCost: 0, avgDaysInStock: 0 };
 
     res.json({
       success: true,
@@ -688,38 +681,32 @@ router.get('/unified/summary', async (req, res) => {
     const fDb = await getFlwupDb(req);
     const bDb = await getBooranDb(req);
 
-    const [
-      leadsCount,
-      followingUpCount,
-      newLeadsCount,
-      inventoryCount,
-      aging90Count,
-      actionItemsCount,
-    ] = await Promise.all([
-      fDb.collection('leads').countDocuments({ 'sms_campaign.active': { $ne: false } }),
-      fDb.collection('leads').countDocuments({ status: 'following_up', 'sms_campaign.active': { $ne: false } }),
-      fDb.collection('leads').countDocuments({ status: 'new_lead', 'sms_campaign.active': { $ne: false } }),
-      bDb.collection('vehicles').countDocuments(),
-      bDb.collection('vehicles').countDocuments({ agingBucket: '90+' }),
+    const [leadCounts, vehicleCounts, actionItemsCount, activeRooftops] = await Promise.all([
+      fDb.collection('leads').aggregate([
+        { $match: { 'sms_campaign.active': { $ne: false } } }, { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]).toArray(),
+      bDb.collection('vehicles').aggregate([{ $group: { _id: null, total: { $sum: 1 },
+        aging90: { $sum: { $cond: [{ $eq: ['$agingBucket', '90+'] }, 1, 0] } } } }]).toArray(),
       bDb.collection('actionitems').countDocuments({ status: 'open' }),
+      bDb.collection('rooftops').countDocuments(),
     ]);
 
     res.json({
       success: true,
       data: {
         crm: {
-          totalLeads: leadsCount,
-          followingUp: followingUpCount,
-          newLeads: newLeadsCount,
+          totalLeads: leadCounts.reduce((sum, row) => sum + row.count, 0),
+          followingUp: leadCounts.find(row => row._id === 'following_up')?.count || 0,
+          newLeads: leadCounts.find(row => row._id === 'new_lead')?.count || 0,
         },
         inventory: {
-          totalVehicles: inventoryCount,
-          agingOver90Days: aging90Count,
+          totalVehicles: vehicleCounts[0]?.total || 0,
+          agingOver90Days: vehicleCounts[0]?.aging90 || 0,
           openActionItems: actionItemsCount,
         },
         system: {
           rooftopGroup: req.user.role === 'super_admin' ? 'Booran Motors VIC' : req.user.site,
-          activeRooftops: (await bDb.collection('rooftops').countDocuments()),
+          activeRooftops,
           lastSync: new Date().toISOString(),
         },
       },
@@ -749,7 +736,7 @@ router.get('/unified/search', async (req, res) => {
           { vehicle_model: regex },
           { vehicle_make: regex },
         ],
-      }).limit(10).toArray(),
+      }, { projection: LEAD_PROJECTION }).limit(10).toArray(),
       bDb ? bDb.collection('vehicles').find({
         $or: [
           { stockNumber: regex },

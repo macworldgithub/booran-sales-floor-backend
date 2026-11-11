@@ -8,6 +8,41 @@ const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
 const read = (record, field) => field.split('.').reduce((value, key) => value?.[key], record);
 
+test('dashboard queue pages preserve complete totals, pending losses and dealership scope', async t => {
+  const { request, records } = await api(t);
+  const old = '2026-01-01T01:00:00Z';
+  const now = new Date().toISOString();
+  records.leads = Array.from({ length: 13 }, (_, index) => ({
+    _id: new ObjectId(), customer_name: `Prospect ${index}`, dealership_name: 'South Morang Hyundai',
+    status: index === 12 ? 'lost' : 'following_up', created_at: old,
+    ...(index === 1 ? { owner_id: String(records.users[0]._id), owner_name: records.users[0].name } : {}),
+    ...(index === 2 ? { loss_review: { status: 'pending', reason: 'Review' } } : {}),
+    ...(index === 3 ? { last_activity_at: now } : {}),
+    ...(index === 5 ? { loss_review: { status: 'approved', reviewed_at: '2099-01-01T00:00:00Z' } } : {}),
+    source: 'DealerSocket', sms_campaign: { active: index !== 4, snapshot_at: now },
+  }));
+  records.leads.push({ _id: new ObjectId(), dealership_name: 'Other', status: 'following_up' });
+  const full = (await request('/daily-oversight?rooftop=South%20Morang')).body.data;
+  const first = (await request('/daily-oversight?rooftop=South%20Morang&queuePage=1')).body.data;
+  assert.deepEqual(first.summary, full.summary);
+  assert.deepEqual(first.members, full.members);
+  assert.deepEqual(first.losses, full.losses);
+  assert.deepEqual(first.dealerSocket, full.dealerSocket);
+  assert.equal(first.unassigned.length, 5);
+  assert.equal(first.unassignedPagination.total, full.unassigned.length);
+  const second = (await request('/daily-oversight?rooftop=South%20Morang&queuePage=2')).body.data;
+  assert.equal(second.unassigned.length, 5);
+  assert.equal(new Set([...first.unassigned, ...second.unassigned].map(lead => lead.id)).size, 10);
+  assert.deepEqual(second.summary, full.summary);
+  const beyond = (await request('/daily-oversight?rooftop=South%20Morang&queuePage=999')).body.data;
+  assert.equal(beyond.unassigned.length, 0);
+  assert.deepEqual(beyond.summary, full.summary);
+  records.users[0].role = 'sales_consultant';
+  const scoped = (await request('/daily-oversight?queuePage=1')).body.data;
+  assert.equal(scoped.unassignedPagination.total, 0);
+  assert.equal(scoped.summary.activeProspects, 1);
+});
+
 test('incoming replies sync with pagination, exact app correlation, old phone and deduplication', async (t) => {
   let events = [], calls = [];
   const { request, records } = await api(t, { sms: { configured: () => true, listInbound: async options => { calls.push(options); return { results: events.slice(options.offset, options.offset + 1), total: events.length }; } } });
@@ -52,10 +87,94 @@ test('inbox outage preserves saved history, reports warning, and retries without
   assert.ok(lead.sms_inbound_synced_at);
 });
 const equal = (a, b) => a instanceof ObjectId || b instanceof ObjectId ? String(a) === String(b) : a instanceof Date || b instanceof Date ? +new Date(a) === +new Date(b) : a === b;
+function evaluate(row, value) {
+  if (typeof value === 'string' && value.startsWith('$')) return read(row, value.slice(1));
+  if (Array.isArray(value)) return value.map(item => evaluate(row, item));
+  if (!value || typeof value !== 'object' || value instanceof Date || value instanceof ObjectId) return value;
+  const [operator, args] = Object.entries(value)[0] || [];
+  const values = () => evaluate(row, args);
+  switch (operator) {
+    case '$convert': {
+      const input = evaluate(row, args.input);
+      if (args.to === 'date') return input == null ? args.onNull : Number.isFinite(+new Date(input)) ? new Date(input) : args.onError;
+      return ObjectId.isValid(input) ? new ObjectId(input) : args.onError;
+    }
+    case '$eq': { const [a, b] = values(); return equal(a, b); }
+    case '$ne': { const [a, b] = values(); return !equal(a, b); }
+    case '$gte': { const [a, b] = values(); return a >= b; }
+    case '$lt': { const [a, b] = values(); return a < b; }
+    case '$in': { const [item, choices] = values(); return choices.some(choice => equal(item, choice)); }
+    case '$and': return values().every(Boolean);
+    case '$max': return values().filter(item => item != null).sort((a, b) => a < b ? -1 : a > b ? 1 : 0).at(-1) ?? null;
+    case '$cond': return evaluate(row, args[evaluate(row, args[0]) ? 1 : 2]);
+    case '$ifNull': { const [item, fallback] = values(); return item ?? fallback; }
+    default: return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, evaluate(row, item)]));
+  }
+}
+function aggregateRows(rows, pipeline, records) {
+  let result = rows;
+  for (const stage of pipeline) {
+    const [operator, specification] = Object.entries(stage)[0];
+    switch (operator) {
+      case '$match': result = result.filter(row => matches(row, specification)); break;
+      case '$set': result = result.map(row => ({ ...row, ...evaluate(row, specification) })); break;
+      case '$lookup': result = result.map(row => ({ ...row, [specification.as]:
+        (records[specification.from] || []).filter(other => equal(read(row, specification.localField), read(other, specification.foreignField))) })); break;
+      case '$unwind': {
+        const field = specification.slice(1);
+        result = result.flatMap(row => (read(row, field) || []).map(item => ({ ...row, [field]: item })));
+        break;
+      }
+      case '$replaceRoot': result = result.map(row => evaluate(row, specification.newRoot)); break;
+      case '$project': result = result.map(row => Object.fromEntries(Object.entries(specification)
+        .filter(([key, include]) => include && read(row, key) !== undefined).map(([key]) => [key, read(row, key)]))); break;
+      case '$facet': result = [Object.fromEntries(Object.entries(specification)
+        .map(([key, stages]) => [key, aggregateRows(result, stages, records)]))]; break;
+      case '$count': result = result.length ? [{ [specification]: result.length }] : []; break;
+      case '$limit': result = result.slice(0, specification); break;
+      case '$skip': result = result.slice(specification); break;
+      case '$sort': result = [...result].sort((a, b) => {
+        for (const [field, direction] of Object.entries(specification)) {
+          if (read(a, field) < read(b, field)) return -direction;
+          if (read(a, field) > read(b, field)) return direction;
+        }
+        return 0;
+      }); break;
+      case '$group': {
+        const groups = new Map();
+        for (const row of result) {
+          const id = evaluate(row, specification._id) ?? null;
+          const key = JSON.stringify(id);
+          if (!groups.has(key)) groups.set(key, { row: { _id: id }, averages: {} });
+          const group = groups.get(key);
+          for (const [field, accumulator] of Object.entries(specification)) {
+            if (field === '_id') continue;
+            const [operation, input] = Object.entries(accumulator)[0];
+            const value = evaluate(row, input);
+            if (operation === '$first' && !Object.hasOwn(group.row, field)) group.row[field] = value;
+            else if (operation === '$sum') group.row[field] = (group.row[field] || 0) + (typeof value === 'number' ? value : 0);
+            else if (operation === '$max' && (group.row[field] == null || value > group.row[field])) group.row[field] = value;
+            else if (operation === '$avg' && typeof value === 'number') {
+              const average = group.averages[field] ||= { sum: 0, count: 0 };
+              average.sum += value; average.count++;
+            }
+          }
+        }
+        result = [...groups.values()].map(group => ({ ...group.row, ...Object.fromEntries(
+          Object.entries(group.averages).map(([field, average]) => [field, average.sum / average.count])) }));
+        break;
+      }
+      default: throw new Error(`Unimplemented fixture aggregation ${operator}`);
+    }
+  }
+  return result;
+}
+
 function matches(record, query) {
   return Object.entries(query).every(([field, value]) => {
     if (field === '$and') return value.every((part) => matches(record, part));
     if (field === '$or') return value.some((part) => matches(record, part));
+    if (field === '$nor') return !value.some((part) => matches(record, part));
     const actual = read(record, field);
     if (value instanceof RegExp) return typeof actual === 'string' && value.test(actual);
     if (value && typeof value === 'object' && !(value instanceof ObjectId) && !(value instanceof Date)) {
@@ -70,7 +189,7 @@ function matches(record, query) {
           case '$lt': return actual < expected;
           case '$lte': return actual <= expected;
           case '$ne': return !equal(actual, expected) && !(Array.isArray(actual) && actual.some(item => equal(item, expected)));
-          case '$in': return expected.some((item) => equal(actual, item));
+          case '$in': return expected.some((item) => item === null ? actual == null : equal(actual, item));
           case '$nin': return expected.every((item) => !equal(actual, item));
           default: throw new Error(`Unimplemented fixture operator ${operator}`);
         }
@@ -94,6 +213,7 @@ function fixtureDb(records) {
         return cursor;
       },
       async findOne(query) { return rows.find((row) => matches(row, query)) || null; },
+      aggregate: pipeline => ({ toArray: async () => aggregateRows(rows, pipeline, records) }),
       async countDocuments(query) { return rows.filter((row) => matches(row, query)).length; },
       async insertOne(document) {
         document._id ||= new ObjectId();
@@ -172,8 +292,13 @@ async function api(t, services = {}) {
     return { client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) }, command: async () => hooks.ping ? hooks.ping(key) : { ok: 1 }, collection(name) {
       const collection = db.collection(name);
       return { ...collection, async findOne(query) {
-        if (hooks.beforeFindOne) await hooks.beforeFindOne(name, query);
+        if (hooks.beforeRead) await hooks.beforeRead(name, query);
         return collection.findOne(query);
+      }, aggregate(pipeline) {
+        return { toArray: async () => {
+          if (hooks.beforeRead) await hooks.beforeRead(name, pipeline[0]?.$match);
+          return collection.aggregate(pipeline).toArray();
+        } };
       } };
     } };
   } });
@@ -518,7 +643,15 @@ test('the current South Morang collection replaces stale snapshot counts across 
       customer_name: 'Previous name', opportunity_status: id === '103' ? 'Lost' : 'Up/Contacted', assigned_salesperson: 'Bugeja' })) };
   const sourceRows = { settings: [{ key: 'chrome-snapshot', value: JSON.stringify(snapshot) }] };
   const source = fixtureDb(sourceRows);
-  const target = { ...fixtureDb(records), client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) } };
+  let writtenOperations = 0;
+  const storage = fixtureDb(records);
+  const target = { collection: name => {
+    const collection = storage.collection(name);
+    return { ...collection, bulkWrite: async operations => {
+      writtenOperations += operations.length;
+      return collection.bulkWrite(operations);
+    } };
+  }, client: { withSession: async callback => callback({ withTransaction: async operation => operation() }) } };
   assert.equal((await syncSmsCampaign(target, source)).opportunities.status, 'fulfilled');
   const existing = records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10876-101');
   const previous = records.leads.find(lead => lead.deal_id === 'DEALERSOCKET-10876-201');
@@ -561,12 +694,46 @@ test('the current South Morang collection replaces stale snapshot counts across 
   kia.status = 'lost';
   kia.booran_edited_fields = ['status'];
   sourceRows.contacts[0].mobile = '0433333333';
+  writtenOperations = 0;
   await syncSmsCampaign(target, source);
+  assert.equal(writtenOperations, 0, 'an unchanged source skips redundant per-record updates');
   assert.equal(existing.customer_phone, '+61400000000', 'local contact edits survive source refresh');
   assert.equal(kia.status, 'lost', 'a locally reviewed outcome survives source refresh');
   sourceRows.south_morang_prospects = [];
   assert.equal((await syncSmsCampaign(target, source)).opportunities.status, 'rejected', 'an empty new feed cannot resurrect the older snapshot');
   assert.equal(previous.sms_campaign.active, false);
+});
+
+test('batched reports preserve scoped counts, hidden inventory and cost permissions', async t => {
+  const { request, records, user } = await api(t);
+  records.leads[0].owner_id = String(user._id);
+  records.leads[1].owner_id = 'other';
+  Object.assign(records.vehicles[0], { totalStockCost: 15000, accumulatedHoldingCost: 500 });
+  Object.assign(records.vehicles[1], { totalStockCost: 25000, accumulatedHoldingCost: 1000 });
+  records.vehicles.push({ _id: new ObjectId(), rooftopName: 'BYD South Morang', salesFloorHidden: true, daysInStock: 999, totalStockCost: 999999 });
+  records.rooftops = [{ name: 'BYD South Morang' }, { name: 'South Morang Kia' }, { name: 'Booran Cheltenham' }];
+  const crm = (await request('/crm/stats')).body.data;
+  assert.equal(crm.totalLeads, 2);
+  assert.equal(crm.newLeads, 1);
+  assert.equal(crm.sold, 1);
+  assert.equal(crm.conversionRate, '50.0%');
+  const inventory = (await request('/inventory/stats')).body.data;
+  assert.equal(inventory.totalVehicles, 2);
+  assert.equal(inventory.totalStockCost, 40000);
+  assert.equal(inventory.totalHoldingCost, 1500);
+  assert.equal(inventory.avgDaysInStock, 51);
+  assert.equal(inventory.openActionItems, 1);
+  const summary = (await request('/unified/summary')).body.data;
+  assert.deepEqual(summary.crm, { totalLeads: 2, followingUp: 0, newLeads: 1 });
+  assert.deepEqual(summary.inventory, { totalVehicles: 2, agingOver90Days: 1, openActionItems: 1 });
+  assert.equal(summary.system.activeRooftops, 2);
+  user.role = 'sales_consultant';
+  assert.equal((await request('/crm/stats')).body.data.totalLeads, 1);
+  const ownInventory = (await request('/inventory/stats')).body.data;
+  assert.equal(ownInventory.totalVehicles, 2);
+  assert.equal(ownInventory.openActionItems, 0);
+  assert.equal(Object.hasOwn(ownInventory, 'totalStockCost'), false);
+  assert.equal(Object.hasOwn(ownInventory, 'totalHoldingCost'), false);
 });
 
 test('HTTP filters and pagination scope results and totals to authorised dealerships', async (t) => {
@@ -751,7 +918,9 @@ test('HTTP cleared lead details stay cleared and empty action changes cannot res
 });
 
 test('HTTP malformed stored sessions are rejected as expired rather than causing a service outage', async (t) => {
-  const { request, records } = await api(t);
+  const { request, records, user } = await api(t);
+  records.sessions[0].userId = String(user._id);
+  assert.equal((await request('/auth/me')).status, 200, 'legacy string user IDs remain valid');
   records.sessions[0].userId = 'broken-id';
   const result = await request('/auth/me');
   assert.equal(result.status, 401);
@@ -764,7 +933,7 @@ test('HTTP late expired-session responses cannot erase a newer login cookie', as
   let release, started;
   const reached = new Promise((resolve) => { started = resolve; });
   const blocked = new Promise((resolve) => { release = resolve; });
-  hooks.beforeFindOne = async (name) => { if (name === 'sessions') { started(); await blocked; } };
+  hooks.beforeRead = async (name) => { if (name === 'sessions') { started(); await blocked; } };
   const previous = request('/auth/me');
   await reached;
   const login = await request('/auth/login', { method: 'POST', body: JSON.stringify({ email: 'southmorang@booran.com', password: '123456' }) });
