@@ -852,6 +852,28 @@ test('Hyundai DealerSocket login IDs resolve to existing staff without changing 
   assert.equal(third.owner_id, null, 'a login alias cannot grant dealership access');
 });
 
+test('cross-site manager surnames with franchise labels resolve uniquely and respect existing allocations', async () => {
+  const luca = { _id: new ObjectId(), name: 'Luca Molinaro', role: 'manager', site: 'South Morang', allowedSites: ['South Morang'], active: true };
+  const les = { _id: new ObjectId(), name: 'Les Vogdanis', role: 'manager', site: 'South Morang', allowedSites: ['South Morang'], active: true };
+  const records = { users: [luca, les], leads: [] }, now = new Date().toISOString();
+  const rows = [
+    { id: 'manager-kia', site: '10755', franchise: 'South Morang Kia Used Cars', name: 'Fixture one', assignee: 'Molinaro (Kia)', status: 'Up/Contacted', capturedAt: now },
+    { id: 'manager-chery', site: '10755', franchise: 'Chery South Morang', name: 'Fixture two', assignee: 'Molinaro (Kia)', status: 'Up/Contacted', capturedAt: now },
+    { id: 'manager-les', site: '10755', franchise: 'South Morang Kia', name: 'Fixture three', assignee: 'Vogdanis', status: 'Up/Contacted', capturedAt: now },
+  ];
+  const db = fixtureDb(records), source = fixtureDb({ south_morang_prospects: rows });
+  let result = await syncSmsCampaign(db, source);
+  assert.equal(result.opportunities.status, 'fulfilled', result.opportunities.reason?.message);
+  for (const row of records.leads) assert.equal(row.owner_id, String(row.deal_id.endsWith('manager-les') ? les._id : luca._id));
+  const first = records.leads[0]; first.assigned_by = 'manager'; first.owner_id = String(les._id);
+  await syncSmsCampaign(db, source); assert.equal(first.owner_id, String(les._id));
+  records.users.push({ ...luca, _id: new ObjectId(), name: 'Another Molinaro' });
+  const second = records.leads.find(row => row.dealership_name === 'Chery South Morang'); second.owner_id = null;
+  await syncSmsCampaign(db, source); assert.equal(second.owner_id, null, 'an ambiguous surname cannot select a manager');
+  records.users.pop(); luca.allowedSites = ['South Morang Hyundai']; luca.site = 'South Morang Hyundai';
+  await syncSmsCampaign(db, source); assert.equal(second.owner_id, null, 'the franchise label cannot grant site access');
+});
+
 test('the current South Morang collection replaces stale snapshot counts across the correct dealerships', async t => {
   const { request, records } = await api(t);
   records.users.push({ _id: new ObjectId(), name: 'Isaac Bugeja', role: 'sales_consultant', site: 'South Morang Hyundai', active: true });
