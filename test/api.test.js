@@ -181,6 +181,10 @@ test('merging different mobiles retains both search identities and prevents eith
   assert.deepEqual(primary.alternate_phones, ['+61499999999']);
   assert.deepEqual((await request('/leads?search=0499999999')).body.data.map(row => row.id), [String(primary._id)]);
   assert.equal((await request('/prospects', { method: 'POST', body: JSON.stringify({ name: 'Attempted duplicate', phone: '0499999999', dealership: primary.dealership_name }) })).status, 409);
+  const review = (await request('/merge-requests')).body.data[0];
+  const resolved = await request(`/merge-requests/${review.id}/resolve`, { method: 'POST', body: JSON.stringify({ primaryId: String(primary._id), expectedUpdatedAt: review.updatedAt }) });
+  assert.equal(resolved.status, 200, 'manager reviews must also accept an alternate mobile previously confirmed on the primary: ' + resolved.body.error);
+  assert.equal(resolved.body.data.id, String(primary._id));
 });
 
 test('resolving a mobile-edit collision retires the existing secondary instead of leaving two live customers', async t => {
