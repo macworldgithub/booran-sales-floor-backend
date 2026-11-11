@@ -37,7 +37,7 @@ const fixtureMedia = () => ({ name: 'vehicle.mp4', size: 6, content_type: 'video
 test('local files are private until complete and survive creating a new storage instance', async (t) => {
   const { directory, storage } = await localStorage(t);
   const media = fixtureMedia();
-  assert.equal((await storage.prepare(media)).chunk_size, 2 * 1024 * 1024);
+  assert.equal((await storage.prepare(media)).chunk_size, 256 * 1024);
   await assert.rejects(storage.download(media), { status: 404 });
   assert.equal(await storage.uploadChunk(media, 0, Buffer.from([0, 255, 1])), 3);
   await assert.rejects(storage.complete(media), { status: 400 });
@@ -103,7 +103,7 @@ test('Mobile Message uses configured sender, Unicode, Basic auth and stable idem
     assert.deepEqual(await sendSms(payload, fetcher), { status: 'queued', provider_message_id: 'msg-123' });
     assert.equal(sent.options.headers['Idempotency-Key'], 'stable-key');
     assert.equal(sent.options.headers.Authorization, `Basic ${Buffer.from('fixture:fixture-secret').toString('base64')}`);
-    assert.deepEqual(JSON.parse(sent.options.body), { enable_unicode: true, messages: [{ to: payload.phone, message: payload.body, sender: 'Fixture', custom_ref: 'stable-key' }] });
+    assert.deepEqual(JSON.parse(sent.options.body), { enable_unicode: true, shorten_urls: 'auto', messages: [{ to: '61412345678', message: payload.body, sender: 'Fixture', custom_ref: 'stable-key' }] });
     for (const result of [{ status: 'success' }, { status: 'error', message_id: 'not-accepted' }]) {
       assert.equal((await sendSms(payload, async () => ({ ok: true, status: 200, json: async () => ({ results: [result] }) }))).status, 'failed');
     }

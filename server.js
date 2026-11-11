@@ -13,7 +13,10 @@ const { createMediaStorage } = require('./lib/mongo-media-storage');
 const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
 const { syncSmsCampaign, resolveSmsCampaignDatabase, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
-const { isManager, canViewCost } = require('./lib/roles');
+const { isManager, canViewCost, canAccessSite } = require('./lib/roles');
+const { createUniqueLead, duplicateError, updateUniqueMobile, canonicalLead } = require('./lib/lead-identity');
+const { phoneKey } = require('./lib/phone');
+const { installInboundEmailWebhook, pollLeadEmail, mailboxes } = require('./lib/inbound-lead-email');
 const { processVideoJobs } = require('./lib/video-jobs');
 const { installExternalWebhook, installExternalLeads } = require('./lib/external-leads');
 const { installLeadProcess } = require('./lib/lead-process');
@@ -150,6 +153,7 @@ installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 const sweepLeadAlerts = async () => checkAgedLeads(await getFlwupDb());
 installNexgate(router, nextgate, sweepLeadAlerts);
 installExternalWebhook(router, getFlwupDb);
+installInboundEmailWebhook(router, getFlwupDb);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
 installStaffAdmin(router, getFlwupDb, getBooranDb);
 installAllocation(router, getFlwupDb);
@@ -163,6 +167,19 @@ installSitePresence(router, getFlwupDb, storage);
 installLeadAlerts(router, getFlwupDb);
 installCustomerMessages(router, getFlwupDb, sms, storage, async (lead, id, message) =>
   recordAlert(await getFlwupDb(), lead, id, message));
+
+router.get('/messaging/status', require('./lib/workflow-route').route(async (req, res) => {
+  if (!isManager(req.user) || !canAccessSite(req.user, req.query.dealership)) return res.status(403).json({ success: false, error: 'Messaging checks require manager access to this dealership.' });
+  res.json({ success: true, data: await sms.accountStatus(req.query.dealership) });
+}));
+router.get('/integrations/lead-status', require('./lib/workflow-route').route(async (req, res) => {
+  if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Integration status requires a manager account.' });
+  const db = await getFlwupDb(req);
+  const states = await db.collection('integration_sync').find({}).toArray();
+  res.json({ success: true, data: { states, email: canAccessSite(req.user, 'South Morang Hyundai') ? mailboxes().map(inbox => ({
+    address: inbox.address, category: inbox.category, configured: Boolean(inbox.pass),
+  })) : [] } });
+}));
 
 router.get('/leads', async (req, res) => {
   try {
@@ -190,7 +207,7 @@ router.get('/leads', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching leads:', err);
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -205,14 +222,14 @@ router.get('/leads/:id', async (req, res) => {
       query = { deal_id: id };
     }
 
-    const lead = await db.collection('leads').findOne(query, { projection: LEAD_PROJECTION });
+    const lead = await canonicalLead(db.collection('leads'), query, { projection: LEAD_PROJECTION });
     if (!lead) {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
     res.json({ success: true, data: serializeLead(lead) });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -226,12 +243,12 @@ router.post('/leads', async (req, res) => {
       newLead.owner_id = req.user.id;
       newLead.owner_name = req.user.name;
     }
-    const db = await getFlwupDb(req);
-
-    const result = await db.collection('leads').insertOne(newLead);
-    res.status(201).json({ success: true, data: serializeLead({ ...newLead, _id: result.insertedId }) });
+    if (!canAccessSite(req.user, newLead.dealership_name)) return res.status(403).json({ success: false, error: 'This dealership is unavailable.' });
+    const result = await createUniqueLead(await getFlwupDb(), newLead, req.user);
+    if (result.duplicate) throw duplicateError(result, req.user);
+    res.status(201).json({ success: true, data: serializeLead(result.lead) });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -249,6 +266,8 @@ router.patch('/leads/:id', async (req, res) => {
     if (req.body.status === 'lost') invalid('Submit a loss reason for manager review instead of closing this lead.');
     const existingLead = await db.collection('leads').findOne(query);
     if (!existingLead) return res.status(404).json({ success: false, error: 'Lead not found.' });
+    if (existingLead.merged_into) return res.status(409).json({ success: false, error: 'This prospect was merged. Open the primary customer to make changes.' });
+    query = { ...query, merged_into: { $exists: false } };
     if (existingLead.loss_review?.status === 'pending' && req.body.status && req.body.status !== existingLead.status) invalid('Resolve the pending loss review before changing the lead stage.');
     const updateDoc = leadUpdate(req.body, req.user);
     updateDoc.$set.last_activity_at = new Date().toISOString();
@@ -270,11 +289,19 @@ router.patch('/leads/:id', async (req, res) => {
       query = { ...query, owner_id: { $exists: false }, source: { $ne: 'Nextgate' } };
     }
 
-    const result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
+    let result;
+    const nextPhone = updateDoc.$set.customer_phone ?? existingLead.customer_phone;
+    const nextSite = updateDoc.$set.dealership_name || existingLead.dealership_name;
+    if (phoneKey(nextPhone) && (phoneKey(nextPhone) !== phoneKey(existingLead.customer_phone) || nextSite !== existingLead.dealership_name)) {
+      const outcome = await updateUniqueMobile(await getFlwupDb(), { ...existingLead, dealership_name: nextSite }, nextPhone, req.user,
+        session => db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after', session }));
+      if (outcome.duplicate) throw duplicateError(outcome, req.user);
+      result = outcome.lead;
+    } else result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Lead not found.' });
     res.json({ success: true, data: serializeLead(result) });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -282,6 +309,7 @@ router.get('/crm/stats', async (req, res) => {
   try {
     const db = await getFlwupDb(req);
     const [stats] = await db.collection('leads').aggregate([
+      { $match: { merged_into: { $exists: false } } },
       { $facet: {
         statuses: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
         rooftops: [{ $group: { _id: '$dealership_name', count: { $sum: 1 } } }],
@@ -310,7 +338,7 @@ router.get('/crm/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -320,7 +348,7 @@ router.get('/crm/rooftops', async (req, res) => {
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -331,7 +359,7 @@ router.get('/crm/organization', async (req, res) => {
     const org = await db.collection('organizations').findOne();
     res.json({ success: true, data: org });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -383,7 +411,7 @@ router.get('/staff', async (req, res) => {
       availableSites: Array.from(new Set(staffMembers.map((member) => member.site))),
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -421,7 +449,7 @@ router.get('/inventory/vehicles', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching inventory vehicles:', err);
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -444,7 +472,7 @@ router.get('/inventory/vehicles/:id', async (req, res) => {
     const [deal] = await stockDeals(req, String(vehicle._id));
     res.json({ success: true, data: visibleVehicle(vehicle, req.user, deal?.status) });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -467,7 +495,7 @@ router.post('/inventory/vehicles/:id/release-hold', async (req, res) => {
     const result = await releaseHold(db.collection('vehicles'), query, req.body);
     res.json({ success: true, message: 'Vehicle hold released', data: result });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -495,7 +523,7 @@ router.get('/inventory/action-items', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -512,7 +540,7 @@ router.patch('/inventory/action-items/:id', async (req, res) => {
     if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
     res.json({ success: true, message: 'Action item updated', data: result });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -522,7 +550,7 @@ router.get('/inventory/rooftops', async (req, res) => {
     const rooftops = await db.collection('rooftops').find().toArray();
     res.json({ success: true, data: rooftops });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -620,7 +648,7 @@ router.get('/inventory/stats', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -683,7 +711,7 @@ router.get('/unified/summary', async (req, res) => {
 
     const [leadCounts, vehicleCounts, actionItemsCount, activeRooftops] = await Promise.all([
       fDb.collection('leads').aggregate([
-        { $match: { 'sms_campaign.active': { $ne: false } } }, { $group: { _id: '$status', count: { $sum: 1 } } },
+        { $match: { 'sms_campaign.active': { $ne: false }, merged_into: { $exists: false } } }, { $group: { _id: '$status', count: { $sum: 1 } } },
       ]).toArray(),
       bDb.collection('vehicles').aggregate([{ $group: { _id: null, total: { $sum: 1 },
         aging90: { $sum: { $cond: [{ $eq: ['$agingBucket', '90+'] }, 1, 0] } } } }]).toArray(),
@@ -712,7 +740,7 @@ router.get('/unified/summary', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -728,15 +756,7 @@ router.get('/unified/search', async (req, res) => {
     const bDb = req.user.role === 'sales_consultant' ? null : await getBooranDb(req);
 
     const [leads, vehicles, actionItems] = await Promise.all([
-      fDb.collection('leads').find({
-        $or: [
-          { customer_name: regex },
-          { customer_phone: regex },
-          { customer_email: regex },
-          { vehicle_model: regex },
-          { vehicle_make: regex },
-        ],
-      }, { projection: LEAD_PROJECTION }).limit(10).toArray(),
+      fDb.collection('leads').find(leadQuery({ search: q }), { projection: LEAD_PROJECTION }).limit(10).toArray(),
       bDb ? bDb.collection('vehicles').find({
         $or: [
           { stockNumber: regex },
@@ -766,7 +786,7 @@ router.get('/unified/search', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.' });
+    res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
 
@@ -829,6 +849,8 @@ if (!process.env.VERCEL) {
         interval(syncCampaign, SMS_CAMPAIGN_INTERVAL);
       }
       interval(() => database('MONGODB_URI_FLWUP').then(db => processVideoJobs(db, createMediaStorage(async () => db))).catch(() => console.warn('Video queue unavailable.')), 5000);
+      const checkLeadEmail = () => database('MONGODB_URI_FLWUP').then(db => pollLeadEmail(db)).catch(() => console.warn('Inbound lead email is temporarily unavailable.'));
+      if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 60000); }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
       interval(checkAlerts, HOUR);
 

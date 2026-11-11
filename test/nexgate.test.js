@@ -6,8 +6,14 @@ const { nexgateService, HOUR } = require('../lib/nexgate-sync');
 test('hourly reconciliation only advances successful seller checkpoints and saves completed pages', async () => {
   const checkpoints = new Map();
   let batches = 0;
-  const db = { collection(name) {
-    if (name === 'leads') return { bulkWrite: async ops => { batches++; return { upsertedCount: ops.length }; } };
+  const leads = [];
+  const db = { client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) }, collection(name) {
+    if (name === 'leads') return {
+      find: () => ({ toArray: async () => leads }),
+      findOne: async query => leads.find(row => String(row._id) === String(query._id)),
+      insertOne: async row => { leads.push(row); batches++; return { insertedId: row._id }; },
+    };
+    if (name === 'lead_source_links') return { find: () => ({ toArray: async () => [] }) };
     return {
       async findOneAndUpdate({ _id }, { $set }) {
         const state = { ...checkpoints.get(_id), ...$set };

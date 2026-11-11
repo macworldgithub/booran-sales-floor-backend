@@ -6,7 +6,154 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
-const read = (record, field) => field.split('.').reduce((value, key) => value?.[key], record);
+const read = (record, field) => field.split('.').reduce((value, key) => Array.isArray(value) ? value.flatMap(item => item?.[key] === undefined ? [] : item[key]) : value?.[key], record);
+
+test('name and local/international mobile searches find the same scoped customer in both search entry points', async t => {
+  const { request, records } = await api(t);
+  records.leads[0].customer_name = 'Angela   Pokora';
+  records.leads[0].customer_phone = '+61409002310';
+  for (const search of ['angela pokora', '0409002310', '0409 002 310', '+61 409 002 310', '61409002310']) {
+    assert.deepEqual((await request('/leads?search=' + encodeURIComponent(search))).body.data.map(row => row.id), [String(records.leads[0]._id)]);
+    assert.deepEqual((await request('/unified/search?q=' + encodeURIComponent(search))).body.data.leads.map(row => row.id), [String(records.leads[0]._id)]);
+  }
+  records.leads[2].customer_phone = records.leads[0].customer_phone;
+  assert.equal((await request('/leads?search=0409002310')).body.data.length, 1);
+});
+
+test('duplicate mobiles block create and edit, escalate to managers and do not expose another salesperson customer', async t => {
+  const { request, records, user } = await api(t);
+  const lead = records.leads[0]; lead.customer_phone = '+61409002310'; lead.owner_id = 'other';
+  const input = { name: 'Existing customer', phone: '0409002310', dealership: lead.dealership_name };
+  let response = await request('/prospects', { method: 'POST', body: JSON.stringify(input) });
+  assert.equal(response.status, 409); assert.equal(response.body.mergeRequested, true);
+  assert.equal(response.body.existingLeadId, String(lead._id)); assert.equal(records.leads.length, 3);
+  assert.equal((await request('/merge-requests')).body.pagination.total, 1);
+  user.role = 'sales_consultant';
+  response = await request('/prospects', { method: 'POST', body: JSON.stringify(input) });
+  assert.equal(response.status, 409); assert.equal(response.body.existingLeadId, undefined);
+  assert.equal((await request('/merge-requests')).status, 403);
+  user.role = 'manager';
+  records.leads[1].dealership_name = lead.dealership_name;
+  response = await request(`/leads/${records.leads[1]._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '0409002310' }) });
+  assert.equal(response.status, 409); assert.equal(records.leads[1].customer_phone, undefined);
+  assert.equal((await request('/prospects', { method: 'POST', body: JSON.stringify({ ...input, phone: '0412345678' }) })).status, 201, 'walk-ins can be saved before their email is known');
+});
+
+test('manager merge transfers missing details, all linked work and notes while retaining primary decisions and SMS idempotency', async t => {
+  let sends = 0;
+  const { request, records, user } = await api(t, { sms: { sendSms: async () => { sends++; return { status: 'queued' }; } } });
+  const primary = records.leads[0]; primary.customer_phone = '+61412345678'; primary.customer_email = ''; primary.owner_id = String(user._id);
+  primary.owner_name = user.name; primary.status = 'following_up'; primary.diary_entries = [{ author: 'Primary', date: '2026-11-01', note: 'Primary note' }];
+  const secondary = { _id: new ObjectId(), deal_id: 'DEALERSOCKET-10876-fixture', dealership_name: primary.dealership_name,
+    customer_name: 'Alice', customer_phone: '0412 345 678', customer_email: 'alice@example.com', status: 'lost', owner_id: 'old-owner',
+    source: 'DealerSocket', sms_campaign: { active: true, snapshot_at: '2026-11-11T09:00:00Z' }, notes: 'Secondary description',
+    diary_entries: [{ author: 'Secondary', date: '2026-11-02', note: 'Secondary note' }] };
+  records.leads.push(secondary);
+  const oldId = String(secondary._id), mainId = String(primary._id), site = primary.dealership_name;
+  for (const name of ['deals', 'deliveries', 'appraisals', 'sales_alerts']) records[name] = [{ _id: new ObjectId(), lead_id: oldId, dealership: site, owner_id: 'old-owner' }];
+  records.sales_tasks = [{ _id: new ObjectId(), lead_id: oldId, dealership: site, status: 'open', assignee_id: 'old-owner' },
+    { _id: new ObjectId(), lead_id: oldId, dealership: site, status: 'completed', assignee_id: 'old-owner' }];
+  records.appointments = [{ _id: new ObjectId(), leadId: secondary.deal_id, dealership: site }];
+  records.message_media = [{ _id: new ObjectId(), lead_id: oldId, dealership_name: site, status: 'ready' }];
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  records.customer_messages = [{ _id: createHash('sha256').update(`${oldId}:${requestId}`).digest('hex'), lead_id: oldId, dealership_name: site,
+    status: 'queued', body: 'Hello', phone: '+61412345678', fingerprint: createHash('sha256').update(JSON.stringify(['Hello', []])).digest('hex') }];
+  const result = await request(`/leads/${mainId}/merge`, { method: 'POST', body: JSON.stringify({ duplicateId: oldId }) });
+  assert.equal(result.status, 200, result.body.error); assert.equal(result.body.data.email, 'alice@example.com');
+  assert.equal(primary.status, 'following_up'); assert.equal(primary.owner_id, String(user._id)); assert.equal(secondary.merged_into, mainId);
+  assert.ok(primary.diary_entries.some(row => row.note === 'Primary note'));
+  assert.ok(primary.diary_entries.some(row => row.note === 'Secondary note'));
+  assert.ok(primary.diary_entries.some(row => row.note === 'Secondary description'));
+  for (const name of ['deals', 'deliveries', 'appraisals', 'sales_alerts', 'sales_tasks', 'customer_messages', 'message_media']) assert.ok(records[name].every(row => row.lead_id === mainId));
+  assert.equal(records.sales_tasks[0].assignee_id, String(user._id)); assert.equal(records.sales_tasks[1].assignee_id, 'old-owner');
+  assert.equal(records.appointments[0].leadId, mainId);
+  assert.equal((await request(`/leads/${oldId}`)).body.data.id, mainId);
+  assert.equal((await request('/leads?source=DealerSocket')).body.data.length, 1);
+  const retried = await request(`/leads/${mainId}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Hello', media_ids: [], request_id: requestId }) });
+  assert.equal(retried.status, 200); assert.equal(sends, 0, 'a merge cannot resend an already recorded SMS attempt');
+  user.role = 'sales_consultant';
+  assert.equal((await request(`/leads/${mainId}/merge`, { method: 'POST', body: JSON.stringify({ duplicateId: oldId }) })).status, 403);
+});
+
+test('inbound New and Used email is authenticated, idempotent, unassigned and queues duplicate phones for manager resolution', async t => {
+  const saved = process.env.HYUNDAI_INBOUND_EMAIL_SECRET;
+  process.env.HYUNDAI_INBOUND_EMAIL_SECRET = 'mail-fixture-secret-'.repeat(3);
+  t.after(() => { if (saved === undefined) delete process.env.HYUNDAI_INBOUND_EMAIL_SECRET; else process.env.HYUNDAI_INBOUND_EMAIL_SECRET = saved; });
+  const { request, records } = await api(t);
+  const input = { messageId: '<fixture-1@example.test>', to: 'SMHYNew@goodshowroom.com', subject: 'Vehicle enquiry',
+    text: 'Customer Name: Email Customer\nMobile: 0412 345 678\nEmail: customer@example.com\nVehicle: Tucson' };
+  const post = (category, body, authenticated = true) => request('/integrations/inbound-email/' + category, { method: 'POST',
+    headers: authenticated ? { authorization: 'Bearer ' + process.env.HYUNDAI_INBOUND_EMAIL_SECRET } : {}, body: JSON.stringify(body) });
+  assert.equal((await post('new', input, false)).status, 403);
+  assert.equal((await post('new', input)).status, 200);
+  assert.equal((await post('new', input)).body.data.replay, true);
+  const lead = records.leads.find(row => row.source === 'Inbound Email');
+  assert.equal(lead.owner_id, null); assert.equal(lead.status, 'new_lead'); assert.equal(lead.inbound_email.category, 'new');
+  assert.equal(lead.customer_email, 'customer@example.com');
+  const before = records.leads.length;
+  const duplicate = await post('used', { ...input, to: 'SMHYUsed@goodshowroom.com', messageId: '<fixture-2@example.test>' });
+  assert.equal(duplicate.body.data.status, 'merge_review'); assert.equal(records.leads.length, before);
+  const review = (await request('/merge-requests')).body.data[0];
+  const resolved = await request(`/merge-requests/${review.id}/resolve`, { method: 'POST', body: JSON.stringify({ primaryId: String(lead._id), expectedUpdatedAt: review.updatedAt }) });
+  assert.equal(resolved.status, 200, resolved.body.error); assert.equal(records.leads.length, before);
+  assert.equal((await request('/merge-requests')).body.pagination.total, 0);
+  assert.equal((await post('new', { ...input, to: 'outside@example.com' })).status, 400);
+});
+
+test('merging different mobiles retains both search identities and prevents either mobile being recreated', async t => {
+  const { request, records } = await api(t);
+  const primary = records.leads[0]; primary.customer_phone = '+61412345678';
+  const secondary = { _id: new ObjectId(), dealership_name: primary.dealership_name, customer_name: 'Same customer', customer_phone: '+61499999999' };
+  records.leads.push(secondary);
+  const path = `/leads/${primary._id}/merge`;
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ duplicateId: String(secondary._id) }) })).status, 409);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ duplicateId: String(secondary._id), confirmSameCustomer: true }) })).status, 200);
+  assert.deepEqual(primary.alternate_phones, ['+61499999999']);
+  assert.deepEqual((await request('/leads?search=0499999999')).body.data.map(row => row.id), [String(primary._id)]);
+  assert.equal((await request('/prospects', { method: 'POST', body: JSON.stringify({ name: 'Attempted duplicate', phone: '0499999999', dealership: primary.dealership_name }) })).status, 409);
+});
+
+test('resolving a mobile-edit collision retires the existing secondary instead of leaving two live customers', async t => {
+  const { request, records } = await api(t);
+  const primary = records.leads[0]; primary.customer_phone = '+61412345678';
+  const secondary = { _id: new ObjectId(), dealership_name: primary.dealership_name, customer_name: 'Same customer', customer_phone: '+61499999999', notes: 'Keep this history' };
+  records.leads.push(secondary);
+  assert.equal((await request(`/leads/${secondary._id}`, { method: 'PATCH', body: JSON.stringify({ customer_phone: '0412345678' }) })).status, 409);
+  const review = (await request('/merge-requests')).body.data[0];
+  const result = await request(`/merge-requests/${review.id}/resolve`, { method: 'POST', body: JSON.stringify({ primaryId: String(primary._id), expectedUpdatedAt: review.updatedAt }) });
+  assert.equal(result.status, 200, result.body.error);
+  assert.equal(secondary.merged_into, String(primary._id));
+  assert.ok(primary.diary_entries.some(row => row.note === 'Keep this history'));
+  assert.deepEqual(primary.alternate_phones, ['+61499999999']);
+});
+
+test('MongoDB videos uploaded before per-file chunk sizes remain readable across their legacy boundary', async () => {
+  const { createMongoMediaStorage } = require('../lib/mongo-media-storage');
+  const records = {}, storage = createMongoMediaStorage(async () => fixtureDb(records));
+  const media = { _id: new ObjectId(), size: 2 * 1024 * 1024 + 4 };
+  const bytes = Buffer.alloc(media.size, 8); bytes[media.size - 1] = 9;
+  await storage.uploadChunk(media, 0, bytes.subarray(0, 2 * 1024 * 1024));
+  await storage.uploadChunk(media, 2 * 1024 * 1024, bytes.subarray(2 * 1024 * 1024));
+  await storage.complete(media);
+  assert.deepEqual(await storage.readRange(media, 2 * 1024 * 1024 - 2, media.size - 1), bytes.subarray(2 * 1024 * 1024 - 2));
+});
+
+test('numeric DealerSocket IDs and numbered stages import verified email and protect it on empty source replays', async () => {
+  const records = {}, sourceRecords = { south_morang_prospects: [{ id: 801, contactId: 902, site: 10876, franchise: 'South Morang Hyundai New Cars',
+    name: 'Fixture Customer', status: '0 - Unqualified', capturedAt: '2026-11-12T00:00:00Z' }],
+    contacts: [{ dealerSocketContactId: 902, firstName: 'Fixture', lastName: 'Customer', mobile: '0412345678', email: 'fixture@example.test' }] };
+  const target = fixtureDb(records), source = fixtureDb(sourceRecords);
+  let result = await syncSmsCampaign(target, source);
+  assert.equal(result.opportunities.status, 'fulfilled', result.opportunities.reason?.message);
+  const lead = records.leads[0];
+  assert.equal(lead.status, 'new_lead'); assert.equal(lead.customer_email, 'fixture@example.test');
+  assert.equal(lead.customer_phone, '+61412345678');
+  sourceRecords.contacts[0].email = '';
+  sourceRecords.south_morang_prospects[0].status = '6 - Sold';
+  result = await syncSmsCampaign(target, source);
+  assert.equal(result.opportunities.status, 'fulfilled', result.opportunities.reason?.message);
+  assert.equal(lead.customer_email, 'fixture@example.test'); assert.equal(lead.status, 'sold'); assert.equal(lead.sms_campaign.active, false);
+});
 
 test('dashboard queue pages preserve complete totals, pending losses and dealership scope', async t => {
   const { request, records } = await api(t);
@@ -87,28 +234,33 @@ test('inbox outage preserves saved history, reports warning, and retries without
   assert.ok(lead.sms_inbound_synced_at);
 });
 const equal = (a, b) => a instanceof ObjectId || b instanceof ObjectId ? String(a) === String(b) : a instanceof Date || b instanceof Date ? +new Date(a) === +new Date(b) : a === b;
-function evaluate(row, value) {
+function evaluate(row, value, variables = {}) {
+  if (typeof value === 'string' && value.startsWith('$$')) return read(variables, value.slice(2));
   if (typeof value === 'string' && value.startsWith('$')) return read(row, value.slice(1));
-  if (Array.isArray(value)) return value.map(item => evaluate(row, item));
+  if (Array.isArray(value)) return value.map(item => evaluate(row, item, variables));
   if (!value || typeof value !== 'object' || value instanceof Date || value instanceof ObjectId) return value;
   const [operator, args] = Object.entries(value)[0] || [];
-  const values = () => evaluate(row, args);
+  const values = () => evaluate(row, args, variables);
   switch (operator) {
     case '$convert': {
-      const input = evaluate(row, args.input);
+      const input = evaluate(row, args.input, variables);
       if (args.to === 'date') return input == null ? args.onNull : Number.isFinite(+new Date(input)) ? new Date(input) : args.onError;
       return ObjectId.isValid(input) ? new ObjectId(input) : args.onError;
     }
+    case '$literal': return args;
     case '$eq': { const [a, b] = values(); return equal(a, b); }
     case '$ne': { const [a, b] = values(); return !equal(a, b); }
     case '$gte': { const [a, b] = values(); return a >= b; }
     case '$lt': { const [a, b] = values(); return a < b; }
     case '$in': { const [item, choices] = values(); return choices.some(choice => equal(item, choice)); }
+    case '$map': return evaluate(row, args.input, variables).map(item => evaluate(row, args.in, { ...variables, [args.as || 'this']: item }));
+    case '$anyElementTrue': return values()[0].some(Boolean);
     case '$and': return values().every(Boolean);
+    case '$or': return values().some(Boolean);
     case '$max': return values().filter(item => item != null).sort((a, b) => a < b ? -1 : a > b ? 1 : 0).at(-1) ?? null;
-    case '$cond': return evaluate(row, args[evaluate(row, args[0]) ? 1 : 2]);
+    case '$cond': return evaluate(row, args[evaluate(row, args[0], variables) ? 1 : 2], variables);
     case '$ifNull': { const [item, fallback] = values(); return item ?? fallback; }
-    default: return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, evaluate(row, item)]));
+    default: return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, evaluate(row, item, variables)]));
   }
 }
 function aggregateRows(rows, pipeline, records) {
@@ -180,7 +332,7 @@ function matches(record, query) {
     if (value && typeof value === 'object' && !(value instanceof ObjectId) && !(value instanceof Date)) {
       return Object.entries(value).every(([operator, expected]) => {
         switch (operator) {
-          case '$regex': return typeof actual === 'string' && new RegExp(expected, value.$options).test(actual);
+          case '$regex': return (Array.isArray(actual) ? actual : [actual]).some(item => typeof item === 'string' && new RegExp(expected, value.$options).test(item));
           case '$options': return true;
           case '$exists': return (actual !== undefined) === expected;
           case '$type': return typeof actual === expected;
@@ -201,7 +353,7 @@ function matches(record, query) {
 // In-memory storage exercises the real Express/auth/scoping/query/validation layers.
 // It deliberately implements only the Mongo operations used by these HTTP scenarios.
 function fixtureDb(records) {
-  return { collection(name) {
+  return { client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) }, collection(name) {
     const rows = records[name] ||= [];
     return {
       find(query) {
@@ -243,7 +395,8 @@ function fixtureDb(records) {
             if (!upsert) continue;
             row = { ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++;
           }
-          for (const [key, value] of Object.entries(update.$set)) {
+          if (Array.isArray(update)) { Object.assign(row, aggregateRows([row], update, records)[0]); continue; }
+          for (const [key, value] of Object.entries(update.$set || {})) {
             const [field, child] = key.split('.');
             if (child) (row[field] ||= {})[child] = value;
             else row[field] = value;
@@ -1259,11 +1412,13 @@ test('MongoDB media uploads produce a real viewer and bounded binary photo/video
   const contentPath = `/leads/${lead._id}/media/${prepared.body.data.id}/content`;
   const url = `${baseUrl}/media/${records.message_media[0].share_token}`;
   assert.equal((await fetch(url)).status, 404);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: Buffer.alloc(length, 0), headers: { 'content-type': 'application/octet-stream' } })).status, 409);
+  const chunkSize = prepared.body.data.upload.chunk_size;
+  assert.equal(chunkSize, 256 * 1024);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: Buffer.alloc(chunkSize, 0), headers: { 'content-type': 'application/octet-stream' } })).status, 409);
   assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 400);
-  assert.equal((await request(contentPath + `?offset=${length}`, { method: 'PUT', body: bytes.subarray(length), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+  for (let offset = chunkSize; offset < bytes.length; offset += chunkSize) assert.equal((await request(contentPath + `?offset=${offset}`, { method: 'PUT', body: bytes.subarray(offset, offset + chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
   assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 200);
   const viewer = await fetch(url);
   assert.equal(viewer.status, 200);
