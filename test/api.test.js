@@ -635,6 +635,42 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
   assert.ok(second.diary_entries.some(entry => entry.note === 'Keep this note'));
 });
 
+test('Hyundai DealerSocket login IDs resolve to existing staff without changing manager allocations', async t => {
+  const { records } = await api(t);
+  const site = 'South Morang Hyundai';
+  const people = ['Isaac Bugeja', 'George Simogiannis', 'Khan Cetin'].map(name => ({
+    _id: new ObjectId(), name, active: true, role: 'sales_consultant', site,
+  }));
+  records.users.push(...people);
+  const rows = ['s7xisaacb', 's7xgsimo', 's7xkhanc'].map((assignee, index) => ({
+    id: String(900 + index), site: '10876', franchise: site, name: `Customer ${index}`, assignee,
+    status: 'Up/Contacted', capturedAt: '2026-11-11T09:00:00Z',
+  }));
+  const source = fixtureDb({ south_morang_prospects: rows });
+  const target = { ...fixtureDb(records), client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) } };
+  let result = await syncSmsCampaign(target, source);
+  assert.equal(result.opportunities.status, 'fulfilled', result.opportunities.reason?.message);
+  for (const [index, person] of people.entries()) {
+    const lead = records.leads.find(row => row.deal_id === `DEALERSOCKET-10876-${900 + index}`);
+    assert.equal(lead.owner_id, String(person._id));
+    assert.equal(lead.owner_name, person.name);
+    assert.equal(lead.owner_source, 'dealersocket');
+  }
+  const lead = records.leads.find(row => row.deal_id === 'DEALERSOCKET-10876-900');
+  lead.owner_id = String(people[1]._id);
+  lead.assigned_by = 'manager';
+  const noteCount = lead.diary_entries.length;
+  result = await syncSmsCampaign(target, source);
+  assert.equal(result.opportunities.status, 'fulfilled');
+  assert.equal(lead.owner_id, String(people[1]._id));
+  assert.equal(lead.diary_entries.length, noteCount);
+  people[2].site = 'South Morang Kia';
+  const third = records.leads.find(row => row.deal_id === 'DEALERSOCKET-10876-902');
+  third.owner_id = null;
+  await syncSmsCampaign(target, source);
+  assert.equal(third.owner_id, null, 'a login alias cannot grant dealership access');
+});
+
 test('the current South Morang collection replaces stale snapshot counts across the correct dealerships', async t => {
   const { request, records } = await api(t);
   records.users.push({ _id: new ObjectId(), name: 'Isaac Bugeja', role: 'sales_consultant', site: 'South Morang Hyundai', active: true });
