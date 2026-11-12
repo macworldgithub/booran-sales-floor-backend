@@ -28,6 +28,8 @@ test('XML attachments, email-only customers and New/Used inbox routing preserve 
   assert.equal(first.inbound_email.category, 'used'); assert.equal(first.inbound_email.adf.vehicle_status, 'new');
   const emailOnly = emailLead('new', message(xml.replace('<phone type="cellphone">0412345678</phone>', '')));
   assert.equal(emailOnly.customer_phone, ''); assert.equal(emailOnly.customer_email, 'test@example.com');
+  const landlineOnly = emailLead('new', message(xml.replace('<email>test@example.com</email>', '').replace('0412345678', '03 8432 3000')));
+  assert.equal(landlineOnly.customer_phone, '+61384323000'); assert.equal(landlineOnly.customer_email, '');
   assert.equal(parseAdfLead(message('Customer Name: Legacy\nMobile: 0412345678')), null);
 });
 
