@@ -539,6 +539,27 @@ async function api(t, services = {}) {
   return { request, records, user, token, hooks, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
 }
 
+test('workday date selection includes historical closed-customer activity and preserves dealership scope', async t => {
+  const { request, records } = await api(t);
+  const { dayKey } = require('../lib/followup-policy');
+  const at = new Date(Date.now() - 3 * 86400000).toISOString(), date = dayKey(at);
+  const person = { _id: new ObjectId(), name: 'Workday salesperson', active: true, role: 'sales_consultant', site: 'BYD South Morang' };
+  records.users.push(person);
+  const lead = { _id: new ObjectId(), dealership_name: person.site, owner_id: String(person._id), status: 'lost',
+    customer_name: 'Historical customer', diary_entries: [{ author: person.name, author_id: String(person._id), date: at, note: 'Historical note' }] };
+  records.leads.push(lead);
+  records.message_media = [{ _id: new ObjectId(), dealership_name: person.site, lead_id: String(lead._id), user_id: String(person._id), author: person.name,
+    content_type: 'video/mp4', status: 'ready', created_at: at }];
+  const path = `/daily-oversight?rooftop=BYD%20South%20Morang&queuePage=1&date=${date}`;
+  const result = await request(path); assert.equal(result.status, 200, result.body.error);
+  assert.equal(result.body.data.workday.date, date);
+  assert.equal(result.body.data.workday.members.find(row => row.id === String(person._id)).customersUpdated, 1);
+  assert.equal(result.body.data.workday.totals.videosAdded, 1);
+  const outside = await request(path.replace('BYD%20South%20Morang', 'South%20Morang%20Hyundai'));
+  assert.equal(outside.body.data.workday.totals.customersUpdated, 0);
+  assert.equal((await request(path.replace(date, '2026-02-30'))).status, 400);
+});
+
 test('daily oversight carries work forward and requires managers to resolve a loss request', async t => {
   const { request, records } = await api(t);
   const site = 'BYD South Morang';

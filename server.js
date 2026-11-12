@@ -276,6 +276,9 @@ router.patch('/leads/:id', async (req, res) => {
     if (existingLead.loss_review?.status === 'pending' && req.body.status && req.body.status !== existingLead.status) invalid('Resolve the pending loss review before changing the lead stage.');
     const updateDoc = leadUpdate(req.body, req.user);
     updateDoc.$set.last_activity_at = new Date().toISOString();
+    updateDoc.$set.last_activity_by = req.user.id;
+    updateDoc.$push = { ...updateDoc.$push, activity_events: { date: updateDoc.$set.last_activity_at,
+      author_id: req.user.id, author: req.user.name, kind: 'customer_update' } };
     if (req.body.status && req.body.status !== existingLead.status) {
       query = { ...query, status: existingLead.status, 'loss_review.status': { $ne: 'pending' } };
       updateDoc.$inc = { process_revision: 1 };
