@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?adf version="1.0"?>
+<adf>
+  <prospect status="new">
+    <id sequence="1" source="Website">LEAD-20261112-001</id>
+    <requestdate>2026-11-12T17:43:00+11:00</requestdate>
+    <vehicle interest="test-drive" status="new">
+      <year>2026</year>
+      <make>Hyundai</make>
+      <model>Kona</model>
+    </vehicle>
+    <customer>
+      <contact>
+        <name part="first">Test</name>
+        <name part="last">User</name>
+        <email>test@example.com</email>
+        <phone type="cellphone">0412345678</phone>
+      </contact>
+      <comments>Interested in test drive for Kona. Preferred time 9:15am.</comments>
+    </customer>
+    <vendor><vendorname>South Morang Hyundai</vendorname></vendor>
+    <provider>
+      <name part="full">South Morang Hyundai Website</name>
+      <service>Test Drive Booking</service>
+      <url>https://www.southmoranghyundai.com.au/book-test-drive</url>
+    </provider>
+  </prospect>
+</adf>

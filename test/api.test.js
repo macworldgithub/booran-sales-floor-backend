@@ -128,6 +128,48 @@ test('inbound New and Used email is authenticated, idempotent, unassigned and qu
   assert.equal((await post('new', { ...input, to: 'outside@example.com' })).status, 400);
 });
 
+test('ADF intake is unassigned, uses stable website identity across resends and scopes mailbox receipt counts', async t => {
+  const { ingestLeadEmail } = require('../lib/inbound-lead-email');
+  const xml = require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/hyundai-website-lead.xml'), 'utf8');
+  const { request, records } = await api(t);
+  const db = fixtureDb(records);
+  const first = await ingestLeadEmail(db, 'new', { messageId: '<adf-first@example.test>', text: xml });
+  assert.equal(first.status, 'imported');
+  const count = records.leads.length;
+  const replay = await ingestLeadEmail(db, 'new', { messageId: '<adf-resend@example.test>', text: xml.replace('status="new"', 'status="resend"') });
+  assert.equal(replay.replay, true); assert.equal(replay.leadId, first.leadId); assert.equal(records.leads.length, count);
+  const review = await ingestLeadEmail(db, 'used', { messageId: '<bad-adf@example.test>', text: xml.replace('</adf>', '') });
+  assert.equal(review.status, 'needs_review'); assert.equal(records.leads.length, count);
+  const lead = records.leads.find(row => String(row._id) === first.leadId);
+  assert.equal(lead.owner_id, null); assert.equal(lead.inbound_email.format, 'adf');
+  const listed = await request('/leads?dealership=South%20Morang%20Hyundai&source=Inbound%20Email&assignment=unassigned&status=new_lead');
+  assert.equal(listed.body.pagination.total, 1);
+  const status = await request('/integrations/lead-status');
+  assert.equal(status.body.data.email.find(inbox => inbox.category === 'new').imported, 2);
+  assert.equal(status.body.data.email.find(inbox => inbox.category === 'used').needsReview, 1);
+});
+
+test('IMAP polling keeps messages unread and continues past malformed XML to an attached valid lead', async () => {
+  const { pollLeadEmail } = require('../lib/inbound-lead-email');
+  const xml = require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/hyundai-website-lead.xml'), 'utf8');
+  const mime = [
+    'Message-ID: <invalid-adf@example.test>\r\nContent-Type: text/plain\r\n\r\n<adf><prospect>',
+    ['Message-ID: <attached-adf@example.test>', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="fixture"', '',
+      '--fixture', 'Content-Type: text/plain', '', 'Please see the lead attachment.', '--fixture',
+      'Content-Type: application/xml; name="lead.xml"', 'Content-Disposition: attachment; filename="lead.xml"', '', xml, '--fixture--', ''].join('\r\n'),
+  ];
+  const records = {}, client = { mailbox: { uidValidity: 42 }, on() {}, async connect() {}, async logout() {},
+    async getMailboxLock(name, options) { assert.equal(name, 'INBOX'); assert.deepEqual(options, { readOnly: true }); return { release() {} }; }, async search() { return [1, 2]; },
+    async fetchOne(uid, fields, options) { assert.deepEqual(options, { uid: true }); assert.equal(fields.markSeen, undefined);
+      return fields.size ? { size: mime[uid - 1].length } : { source: Buffer.from(mime[uid - 1]) }; },
+  };
+  await pollLeadEmail(fixtureDb(records), { HYUNDAI_INBOUND_NEW_PASSWORD: 'fixture-only' }, () => client);
+  assert.equal(records.leads.length, 1); assert.equal(records.leads[0].customer_name, 'Test User');
+  assert.equal(records.lead_email_receipts.length, 2);
+  assert.equal(records.lead_email_receipts.find(row => row.status === 'needs_review').address, 'SMHYNew@goodshowroom.com');
+  assert.equal(records.integration_sync[0].last_uid, 2); assert.equal(records.integration_sync[0].error, null);
+});
+
 test('merging different mobiles retains both search identities and prevents either mobile being recreated', async t => {
   const { request, records } = await api(t);
   const primary = records.leads[0]; primary.customer_phone = '+61412345678';

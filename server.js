@@ -177,9 +177,13 @@ router.get('/integrations/lead-status', require('./lib/workflow-route').route(as
   if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Integration status requires a manager account.' });
   const db = await getFlwupDb(req);
   const states = await db.collection('integration_sync').find({}).toArray();
-  res.json({ success: true, data: { states, email: canAccessSite(req.user, 'South Morang Hyundai') ? mailboxes().map(inbox => ({
-    address: inbox.address, category: inbox.category, configured: Boolean(inbox.pass),
-  })) : [] } });
+  const email = canAccessSite(req.user, 'South Morang Hyundai') ? await Promise.all(mailboxes().map(async inbox => {
+    const receipts = db.collection('lead_email_receipts');
+    const [imported, pendingMerges, needsReview] = await Promise.all(['imported', 'merge_review', 'needs_review'].map(status =>
+      receipts.countDocuments({ address: inbox.address, status })));
+    return { address: inbox.address, category: inbox.category, configured: Boolean(inbox.pass), imported, pendingMerges, needsReview };
+  })) : [];
+  res.json({ success: true, data: { states, email } });
 }));
 
 router.get('/leads', async (req, res) => {
