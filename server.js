@@ -27,6 +27,8 @@ const { installSalesWorkflows } = require('./lib/sales-workflows');
 const { installSitePresence } = require('./lib/site-presence');
 const { installProspects, businessId } = require('./lib/prospects');
 const { installLeadAlerts, recordAlert, checkAgedLeads } = require('./lib/lead-alerts');
+const { installSmsNotifications } = require('./lib/sms-notifications');
+const { pollInbound } = require('./lib/inbound-messages');
 
 
 require('dotenv').config();
@@ -166,8 +168,16 @@ installExternalLeads(router, getFlwupDb);
 installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
 installSitePresence(router, getFlwupDb, storage);
 installLeadAlerts(router, getFlwupDb);
-installCustomerMessages(router, getFlwupDb, sms, storage, async (lead, id, message) =>
-  recordAlert(await getFlwupDb(), lead, id, message));
+const onSmsReply = async (lead, id, message) => recordAlert(await getFlwupDb(), lead, id, message);
+installCustomerMessages(router, getFlwupDb, sms, storage, onSmsReply);
+installSmsNotifications(router, getFlwupDb, sms);
+let checkingSmsReplies = false;
+app.locals.checkSmsReplies = async () => {
+  if (checkingSmsReplies) return { busy: true };
+  checkingSmsReplies = true;
+  try { return await pollInbound({ db: await getFlwupDb(), sms, onInbound: onSmsReply }); }
+  finally { checkingSmsReplies = false; }
+};
 
 router.get('/messaging/status', require('./lib/workflow-route').route(async (req, res) => {
   if (!isManager(req.user) || !canAccessSite(req.user, req.query.dealership)) return res.status(403).json({ success: false, error: 'Messaging checks require manager access to this dealership.' });
@@ -857,6 +867,10 @@ if (!process.env.VERCEL) {
         interval(syncCampaign, SMS_CAMPAIGN_INTERVAL);
       }
       interval(() => database('MONGODB_URI_FLWUP').then(db => processVideoJobs(db, createMediaStorage(async () => db))).catch(() => console.warn('Video queue unavailable.')), 5000);
+      if (mobileMessage.configured()) {
+        const checkSmsReplies = () => app.locals.checkSmsReplies().catch(() => console.warn('Incoming SMS check is temporarily unavailable.'));
+        void checkSmsReplies(); interval(checkSmsReplies, 30000);
+      }
       const checkLeadEmail = () => database('MONGODB_URI_FLWUP').then(db => pollLeadEmail(db)).catch(() => console.warn('Inbound lead email is temporarily unavailable.'));
       if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 60000); }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));

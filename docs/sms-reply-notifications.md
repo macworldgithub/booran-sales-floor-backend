@@ -1,0 +1,11 @@
+# SMS reply notifications
+
+The VPS checks Mobile Message's inbox every 30 seconds without consuming messages or changing the shared provider webhook. Replies must match a Sales Floor outgoing message reference and its original recipient phone. Replies belonging to another application are excluded. Partial inbox pages resume from a saved checkpoint; completed checks overlap the previous UTC day for late arrivals. Imported messages use a deterministic provider-message ID, so retries and conversation refreshes do not create duplicate replies or notifications.
+
+The platform polls its notification feed every 20 seconds while visible and refreshes when returning online or switching back to the tab. The header bell is available to salespeople and managers, with an unread SMS count. Notifications show the customer, dealership, Melbourne time and a plain-text reply preview. Opening a notification opens the customer's SMS section and marks that reply read only for the current account. The notification centre also supports mark-all-read, unread-only/recent replies and pagination.
+
+`GET /api/notifications?rooftop=...&page=1&unread=true` returns `items`, `unreadCount`, a polling warning and the last successful inbox check time. `PATCH /api/notifications/:id/read` and `POST /api/notifications/read-all` persist per-account reads. Read status is stored on existing customer message records; polling state uses the existing integration state collection. No new MongoDB collection or mailbox setup is needed.
+
+Visibility follows current customer ownership and dealership access: consultants see replies for customers assigned to them; authorised managers see their selected dealerships, including unassigned customers. Reassignment and merges automatically follow the customer, and read state survives merges. Contractors cannot read these notifications. Unsubscribe events remain in message history but are not displayed as customer reply notifications.
+
+Existing Mobile Message credentials are reused. Failed background checks preserve saved notifications and expose a retry warning; the next timer retries automatically. This implements in-platform alerts. It does not request browser notification permission or add new outbound SMS, email, or device-push delivery.

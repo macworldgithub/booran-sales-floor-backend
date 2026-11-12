@@ -453,11 +453,12 @@ function fixtureDb(records) {
       async updateMany(query, update) {
         const matchesQuery = rows.filter(row => matches(row, query));
         for (const row of matchesQuery) {
-          for (const [key, value] of Object.entries(update.$set)) {
+          for (const [key, value] of Object.entries(update.$set || {})) {
             const [field, child] = key.split('.');
             if (child) (row[field] ||= {})[child] = value;
             else row[field] = value;
           }
+          for (const [key, value] of Object.entries(update.$addToSet || {})) row[key] = [...new Set([...(row[key] || []), ...(value.$each || [value])])];
         }
         return { modifiedCount: matchesQuery.length };
       },
@@ -491,6 +492,7 @@ function fixtureDb(records) {
         for (const key of Object.keys(update.$unset || {})) delete row[key];
         for (const [key, value] of Object.entries(update.$inc || {})) row[key] = (row[key] || 0) + value;
         for (const [key, value] of Object.entries(update.$push || {})) (row[key] ||= []).push(value);
+        for (const [key, value] of Object.entries(update.$max || {})) if (row[key] == null || row[key] < value) row[key] = value;
         return { ...row };
       },
     };
@@ -536,8 +538,68 @@ async function api(t, services = {}) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api${path}`, { ...options, headers: { cookie: `booran_session=${token}`, 'content-type': 'application/json', ...options.headers } });
     return { status: response.status, body: await response.json(), headers: response.headers };
   }
-  return { request, records, user, token, hooks, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
+  return { request, records, user, token, hooks, app, baseUrl: `http://127.0.0.1:${server.address().port}/api` };
 }
+
+test('background SMS replies notify owner and managers without opening a customer, with independent reads and current ownership scope', async t => {
+  let events = [];
+  const { request, records, user, app } = await api(t, { sms: { configured: () => true, listInbound: async () => ({ results: events, total: events.length }) } });
+  const lead = records.leads[0]; lead.owner_id = String(user._id); user.role = 'sales_consultant';
+  records.customer_messages = [{ _id: 'attempt', lead_id: String(lead._id), dealership_name: lead.dealership_name, phone: '+61412345678', provider_message_id: 'sent-id', created_at: '2026-11-11T00:00:00Z', status: 'sent' }];
+  const reply = { message_id: 'reply', from: '0412345678', message: 'Yes, thank you', type: 'inbound', received_at: '2026-11-12 01:00:00', original_message_id: 'sent-id' };
+  events = [reply, { ...reply, message_id: 'other-app', original_message_id: 'foreign' }, { ...reply, message_id: 'opt-out', type: 'unsubscribe', message: 'STOP' }];
+  assert.equal((await app.locals.checkSmsReplies()).imported, 2);
+  let feed = (await request('/notifications')).body;
+  assert.equal(feed.data.unreadCount, 1); assert.equal(feed.data.items[0].customer, 'Alice');
+  assert.equal(feed.data.items[0].body, 'Yes, thank you');
+  const id = feed.data.items[0].id;
+  await app.locals.checkSmsReplies(); assert.equal(records.customer_messages.length, 3); assert.equal(lead.diary_entries.length, 2);
+  assert.equal((await request(`/notifications/${id}/read`, { method: 'PATCH', body: '{}' })).status, 200);
+  assert.equal((await request(`/notifications/${id}/read`, { method: 'PATCH', body: '{}' })).status, 200);
+  assert.equal((await request('/notifications')).body.data.unreadCount, 0);
+  assert.equal((await request('/notifications?unread=false')).body.data.items[0].read, true);
+  const manager = { ...user, _id: new ObjectId(), role: 'manager' }; records.users.push(manager); records.sessions[0].userId = manager._id;
+  assert.equal((await request('/notifications')).body.data.unreadCount, 1, 'another account has its own unread status');
+  records.sessions[0].userId = user._id; lead.owner_id = String(new ObjectId());
+  assert.equal((await request('/notifications?unread=false')).body.data.items.length, 0);
+  assert.equal((await request(`/notifications/${id}/read`, { method: 'PATCH', body: '{}' })).status, 404);
+  user.role = 'contractor'; assert.equal((await request('/notifications')).status, 403);
+});
+
+test('notification pagination, rooftop filtering and mark-all-read affect only the current account and authorised customers', async t => {
+  const { request, records, user } = await api(t);
+  const make = (i, lead) => ({ _id: 'inbound:' + String(i).padStart(64, '0'), lead_id: String(lead._id), dealership_name: lead.dealership_name, direction: 'inbound', event_type: 'inbound', body: 'Reply ' + i, created_at: '2026-11-12T01:00:00Z' });
+  records.customer_messages = Array.from({ length: 25 }, (_, i) => make(i, records.leads[0]));
+  records.customer_messages.push(make(25, records.leads[1]), make(26, records.leads[2]));
+  let result = await request('/notifications'); assert.equal(result.body.data.unreadCount, 26); assert.equal(result.body.data.items.length, 20);
+  assert.equal((await request('/notifications?page=2')).body.data.items.length, 6);
+  assert.equal((await request('/notifications?rooftop=South%20Morang%20Kia')).body.data.unreadCount, 1);
+  await request('/notifications/read-all?rooftop=BYD%20South%20Morang', { method: 'POST', body: '{}' });
+  assert.equal((await request('/notifications')).body.data.unreadCount, 1);
+  assert.ok(records.customer_messages.slice(0, 25).every(row => row.notification_read_by.includes(String(user._id))));
+  assert.equal(records.customer_messages[25].notification_read_by, undefined); assert.equal(records.customer_messages[26].notification_read_by, undefined);
+  assert.equal((await request('/notifications/inbound:bad/read', { method: 'PATCH', body: '{}' })).status, 404);
+});
+
+test('background inbox resumes partial pages and retries outages without losing replies or duplicating merged customer history', async () => {
+  const { pollInbound } = require('../lib/inbound-messages');
+  const primary = { _id: new ObjectId(), customer_name: 'Primary', dealership_name: 'South Morang Hyundai' };
+  const secondary = { _id: new ObjectId(), merged_into: String(primary._id), dealership_name: primary.dealership_name };
+  const records = { leads: [primary, secondary], customer_messages: [{ _id: 'attempt', lead_id: String(secondary._id), dealership_name: primary.dealership_name, phone: '+61412345678', provider_message_id: 'out', created_at: '2026-11-10T00:00:00Z' }] };
+  const db = fixtureDb(records), calls = []; let failure = false, callbacks = 0;
+  const events = [0, 1, 2].map(i => ({ message_id: 'reply-' + i, original_message_id: 'out', from: '0412345678', message: 'Reply ' + i, type: 'inbound', received_at: '2026-11-12 01:00:00' }));
+  const sms = { configured: () => true, listInbound: async options => { calls.push(options); if (failure) throw new Error('outage'); return { results: events.slice(options.offset, options.offset + 1), total: events.length }; } };
+  const input = { db, sms, now: new Date('2026-11-13T01:00:00Z'), maxPages: 1, onInbound: async () => { callbacks++; } };
+  assert.equal((await pollInbound(input)).complete, false); assert.equal(records.integration_sync[0].offset, 1);
+  failure = true; await assert.rejects(pollInbound(input)); assert.equal(records.integration_sync[0].offset, 1);
+  failure = false; await pollInbound(input); assert.equal(records.integration_sync[0].offset, 2);
+  assert.equal((await pollInbound(input)).complete, true); assert.equal(records.integration_sync[0].offset, 0);
+  assert.equal(records.integration_sync[0].from, '2026-11-12'); assert.equal(records.integration_sync[0].error, null);
+  await pollInbound({ ...input, maxPages: 5 }); assert.equal(callbacks, 3);
+  const replies = records.customer_messages.filter(row => row.direction === 'inbound'); assert.equal(replies.length, 3);
+  assert.ok(replies.every(row => row.lead_id === String(primary._id))); assert.equal(primary.diary_entries.length, 3);
+  assert.deepEqual(calls.slice(0, 4).map(call => call.offset), [0, 1, 1, 2]);
+});
 
 test('workday date selection includes historical closed-customer activity and preserves dealership scope', async t => {
   const { request, records } = await api(t);
