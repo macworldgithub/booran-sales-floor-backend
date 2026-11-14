@@ -69,10 +69,14 @@ test('changed list fields and disappearing active opportunities schedule verifie
   const { opportunityId } = require('../lib/connex-policy');
   const ids = ['006TJ000013YBI9', '006TJ000013YBIA', '006TJ000013YBIB'].map(opportunityId);
   const signature = fields => hash(Object.fromEntries(['Opportunity Status','Dealer Sub-Status','Salesperson in charge','Account Name','Product of Interest','Opportunity Type'].map(field => [field, fields[field] || ''])));
-  const before = { 'Opportunity Status': 'Distributed' }, records = { integration_sync: ids.map(recordId => ({
+  const before = { 'Opportunity Status': 'Distributed' }, records = { integration_sync: ids.map((recordId, priority_order) => ({
     _id: `connex:candidate:${recordId}`, kind: 'connex_candidate', dealership: 'South Morang Hyundai', recordId,
-    last_read_at: new Date(), was_active: true, list_fingerprint: signature(before),
-  })) }, db = fixtureDb(records), readIds = [];
+    last_read_at: new Date(), was_active: true, list_fingerprint: signature(before), priority_order,
+  })) }, raw = fixtureDb(records), readIds = []; let unchangedWrites = 0;
+  const db = { ...raw, collection(name) { const collection = raw.collection(name); return { ...collection, findOneAndUpdate: async (query, update, options) => {
+    if (query._id === `connex:candidate:${ids[1]}`) unchangedWrites++;
+    return collection.findOneAndUpdate(query, update, options);
+  } }; } };
   const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {},
     discover: async () => ({ complete: false, activeAvailable: true, activeIds: ids.slice(0,2), records: [
       { recordId: ids[0], fields: { 'Opportunity Status': 'Accepted' } }, { recordId: ids[1], fields: before },
@@ -82,6 +86,8 @@ test('changed list fields and disappearing active opportunities schedule verifie
   assert.deepEqual(readIds.sort(), [ids[0], ids[2]].sort());
   assert.equal(records.integration_sync.find(row => row.recordId === ids[2] && row.kind === 'connex_candidate').was_active, false);
   assert.equal(records.integration_sync.filter(row => row.kind === 'connex_record').length, 2);
+  assert.equal(unchangedWrites, 0, 'unchanged source rows do not need individual round trips');
+  assert.ok(records.integration_sync.find(row => row._id === `connex:candidate:${ids[1]}`).last_seen_at);
 });
 test('a failed database checkpoint cannot permanently latch the Connex worker as running', async () => {
   const { ConnexService } = require('../lib/connex-service'); const records = {}, raw = fixtureDb(records);
