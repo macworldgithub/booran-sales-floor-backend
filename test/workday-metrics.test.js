@@ -129,3 +129,19 @@ test('recorded allocation targets retain historical responsibility after a later
   day = buildWorkdayMetrics(input, date);
   assert.equal(day.members[0].targets.customersUpdated, 0); assert.equal(day.members[1].targets.customersUpdated, 1);
 });
+
+test('a same-day reassignment routes untouched workload to the final salesperson without leaving the first recipient red', () => {
+  const result = buildWorkdayMetrics({ staff, leads: [{ _id: 'lead', owner_id: 'b', diary_entries: [
+    { kind: 'assignment', assignee_id: 'a', date: at },
+    { kind: 'assignment', assignee_id: 'b', date: '2026-11-12T03:00:00Z' },
+  ] }], tasks: [], media: [], messages: [], deals: [] }, date);
+  assert.equal(result.members[0].targets.customersUpdated, 0); assert.equal(result.members[0].signals.videosSent, 'neutral');
+  assert.equal(result.members[1].targets.customersUpdated, 1); assert.equal(result.members[1].signals.videosSent, 'red');
+});
+
+test('a new source customer allocated later that day creates workload without inventing a CRM update', () => {
+  const result = buildWorkdayMetrics({ staff, leads: [{ _id: 'new-source', owner_id: 'a', created_at: at,
+    assigned_at: '2026-11-12T03:00:00Z', owner_source: 'connex' }], tasks: [], media: [], messages: [], deals: [] }, date);
+  assert.equal(result.members[0].targets.customersUpdated, 1); assert.equal(result.members[0].customersUpdated, 0);
+  assert.equal(result.members[0].signals.customersUpdated, 'red'); assert.equal(result.members[0].signals.videosSent, 'red');
+});
