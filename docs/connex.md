@@ -29,6 +29,8 @@ Open **My Connex email and SMS alerts** to opt in to new-lead notifications and 
 
 Manual sync resumes backfill and retries failed reads; it does not reset all successful checkpoints. A full refresh remains an explicit API option. Transient worker failures retry after 30 seconds; authentication failures wait 15 minutes to avoid repeated rejected sign-ins. Discovery errors are separate from detail-read errors, so a failed source list does not stop the saved detail queue. Phase, retry time and sanitized error codes are visible. Source milestone scans batch reads and only rewrite changed baselines. Shutdown closes the browser before the database pool.
 
+Live investigation also found PM2 repeatedly restarting the backend at its 512 MB RSS limit during discovery. The backend now limits its V8 old heap to 256 MB so garbage collection runs before that process limit. Notification scans skip work when no staff have opted in and only fetch owners for linked source records.
+
 Discovery reads the **3. Open** view first, then **All Opportunities**, deduplicating IDs. This prioritizes active enquiries even when the full list is capped. A failed view retains other discovered enquiries. Complete historical coverage still requires an authoritative count/export; the manager can upload source IDs from a Connex CSV export for verified retrieval beyond the list cap.
 
 ## Data integrity and recovery
