@@ -10,6 +10,122 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
+test('Connex saved filters and defaults are private to the manager; filters and source export imports remain scoped', async t => {
+  const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
+  app.locals.connex.client = { configured: true, settings: { writes: true } };
+  const { ingestSnapshot } = require('../lib/connex-store');
+  await ingestSnapshot(fixtureDb(records), connexFixture({ phone: '0412345678', type: 'Finance', salesperson: 'Quoc Truong' }));
+  let result = await request('/connex/records?search=0412345678&type=Finance&stage=Distributed'); assert.equal(result.body.pagination.total, 1);
+  assert.deepEqual(result.body.facets.types, ['Finance']);
+  assert.equal((await request('/connex/records?stage=Closed%20Won')).body.pagination.total, 0);
+  const save = await request('/connex/views', { method: 'PUT', body: JSON.stringify({ action: 'save', name: 'Finance pending', filters: { type: 'Finance', view: 'not_accepted' } }) });
+  const id = save.body.data.views[0].id;
+  assert.equal((await request('/connex/views', { method: 'PUT', body: JSON.stringify({ action: 'pin', id }) })).body.data.pinnedId, id);
+  const first = user._id; user._id = new ObjectId(); records.sessions[0].userId = user._id;
+  assert.equal((await request('/connex/views')).body.data.views.length, 0);
+  assert.equal((await request('/connex/views', { method: 'PUT', body: JSON.stringify({ action: 'pin', id }) })).status, 404);
+  user._id = first; records.sessions[0].userId = first;
+  result = await request('/connex/import-references', { method: 'POST', body: JSON.stringify({ text: 'OpportunityId\n006TJ000013YBI9\n006TJ000013YBI9YAO' }) });
+  assert.equal(result.body.data.queued, 1); assert.equal(records.leads.length, 4);
+  assert.equal((await request('/connex/records?from=2026-02-31')).status, 400);
+});
+test('bulk Connex updates keep per-record approval gates and stable request identities', async t => {
+  const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
+  app.locals.connex.client = { configured: true, settings: { writes: true } };
+  const { ingestSnapshot } = require('../lib/connex-store');
+  const imported = await ingestSnapshot(fixtureDb(records), connexFixture());
+  const input = { recordIds: [connexFixture().recordId], action: 'accept', requestId: 'bulk-fixture-123' };
+  const post = body => request('/connex/bulk-actions', { method: 'POST', body: JSON.stringify(body) });
+  assert.equal((await post(input)).body.data.jobs.length, 1); assert.equal((await post(input)).body.data.jobs.length, 1);
+  assert.equal(records.integration_sync.filter(row => row.kind === 'connex_job').length, 1);
+  let result = await post({ ...input, action: 'close_lost', requestId: 'loss-fixture-bulk' }); assert.equal(result.body.data.errors.length, 1);
+  const lead = records.leads.find(row => String(row._id) === imported.leadId);
+  lead.status = 'lost'; lead.loss_review = { status: 'approved', reason: 'Fixture price reason', connex_lost_reason: 'Lost on Price' };
+  result = await post({ ...input, action: 'close_lost', requestId: 'loss-fixture-approved' }); assert.equal(result.body.data.jobs.length, 1);
+  assert.equal(records.integration_sync.find(row => row.payload?.action === 'close_lost').payload.lostReason, 'Lost on Price');
+  assert.equal((await post({ ...input, recordIds: Array(51).fill(input.recordIds[0]) })).status, 400);
+  user.role = 'sales_consultant'; assert.equal((await post(input)).status, 403);
+});
+test('temporary Connex discovery failures do not stop queued details or discard backfill on a manual retry', async () => {
+  const { ConnexService } = require('../lib/connex-service'); const records = {}, db = fixtureDb(records), id = connexFixture().recordId;
+  records.integration_sync = [{ _id: `connex:candidate:${id}`, kind: 'connex_candidate', dealership: 'South Morang Hyundai', recordId: id, last_read_at: new Date(0) }];
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {}, list: async () => { throw Object.assign(new Error('fixture timeout'), { name: 'TimeoutError' }); }, read: async () => connexFixture() });
+  await service.run(); const control = records.integration_sync.find(row => row._id === 'connex:control');
+  assert.equal(records.leads.length, 1); assert.equal(control.error, null); assert.ok(control.discovery_error.includes('retry automatically'));
+  const read = records.integration_sync.find(row => row.kind === 'connex_candidate').last_read_at;
+  await service.requestSync(); assert.equal(+records.integration_sync.find(row => row.kind === 'connex_candidate').last_read_at, +read);
+});
+test('temporary worker errors retry promptly and expose their phase instead of applying the authentication delay', async () => {
+  const { ConnexService } = require('../lib/connex-service'); const records = {}, db = fixtureDb(records);
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {} });
+  service.milestones = async () => { throw Object.assign(new Error('fixture timeout'), { name: 'TimeoutError' }); };
+  const start = Date.now(); await service.run(); const control = records.integration_sync.find(row => row._id === 'connex:control');
+  assert.equal(control.error_code, 'CONNEX_TIMEOUT'); assert.equal(control.error_phase, 'checking_milestones');
+  assert.ok(+control.retry_at - start >= 29000 && +control.retry_at - start < 40000); assert.equal(+control.lease_until, 0);
+});
+
+test('changed list fields and disappearing active opportunities schedule verified reads without resetting unchanged records', async () => {
+  const { ConnexService } = require('../lib/connex-service'), { hash } = require('../lib/connex-store');
+  const { opportunityId } = require('../lib/connex-policy');
+  const ids = ['006TJ000013YBI9', '006TJ000013YBIA', '006TJ000013YBIB'].map(opportunityId);
+  const signature = fields => hash(Object.fromEntries(['Opportunity Status','Dealer Sub-Status','Salesperson in charge','Account Name','Product of Interest','Opportunity Type'].map(field => [field, fields[field] || ''])));
+  const before = { 'Opportunity Status': 'Distributed' }, records = { integration_sync: ids.map(recordId => ({
+    _id: `connex:candidate:${recordId}`, kind: 'connex_candidate', dealership: 'South Morang Hyundai', recordId,
+    last_read_at: new Date(), was_active: true, list_fingerprint: signature(before),
+  })) }, db = fixtureDb(records), readIds = [];
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {},
+    discover: async () => ({ complete: false, activeAvailable: true, activeIds: ids.slice(0,2), records: [
+      { recordId: ids[0], fields: { 'Opportunity Status': 'Accepted' } }, { recordId: ids[1], fields: before },
+    ] }), read: async id => { readIds.push(id); return connexFixture({ recordId: id, stage: 'Accepted' }); },
+  });
+  await service.run();
+  assert.deepEqual(readIds.sort(), [ids[0], ids[2]].sort());
+  assert.equal(records.integration_sync.find(row => row.recordId === ids[2] && row.kind === 'connex_candidate').was_active, false);
+  assert.equal(records.integration_sync.filter(row => row.kind === 'connex_record').length, 2);
+});
+test('a failed database checkpoint cannot permanently latch the Connex worker as running', async () => {
+  const { ConnexService } = require('../lib/connex-service'); const records = {}, raw = fixtureDb(records);
+  const db = { ...raw, collection(name) { const collection = raw.collection(name); return { ...collection, findOneAndUpdate: async (query, update, options) => {
+    if (query.lease_token && (update.$set?.phase === 'waiting_retry' || update.$set?.lease_until && +update.$set.lease_until === 0)) throw new Error('fixture database checkpoint unavailable');
+    return collection.findOneAndUpdate(query, update, options);
+  } }; } };
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {} });
+  service.milestones = async () => { throw Object.assign(new Error('fixture timeout'), { name: 'TimeoutError' }); };
+  await service.run(); assert.equal(service.running, false); assert.ok(service.lastFailure);
+  const status = await service.status(db); assert.equal(status.running, false); assert.equal(status.errorCode, 'CONNEX_TIMEOUT');
+});
+test('Connex manager approval retains the selected source loss category for the automatic outcome', async t => {
+  const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
+  app.locals.connex.client = { configured: true, settings: { writes: true } };
+  const { ingestSnapshot } = require('../lib/connex-store'); const imported = await ingestSnapshot(fixtureDb(records), connexFixture());
+  const path = `/leads/${imported.leadId}`;
+  let result = await request(path + '/loss-request', { method: 'POST', body: JSON.stringify({ reason: 'Price exceeded the fixture budget', connexLostReason: 'Lost on Price' }) });
+  assert.equal(result.status, 200, result.body.error); assert.equal(result.body.data.loss_review.connex_lost_reason, 'Lost on Price');
+  result = await request(path + '/loss-review', { method: 'POST', body: JSON.stringify({ reviewId: result.body.data.loss_review.id, action: 'approve', notes: '', connexLostReason: 'Lost on Price' }) });
+  assert.equal(result.status, 200, result.body.error);
+  result = await request(path + '/connex/actions', { method: 'POST', body: JSON.stringify({ action: 'close_lost', recordId: connexFixture().recordId, requestId: 'approved-price-fixture' }) });
+  assert.equal(result.status, 202, result.body.error); assert.equal(records.integration_sync.find(row => row.payload?.action === 'close_lost').payload.lostReason, 'Lost on Price');
+});
+test('Connex alert preferences deliver only opt-in own/site alerts and deduplicate daily escalations', async t => {
+  const { request, records, user } = await api(t); user.site = 'South Morang Hyundai';
+  const { ingestSnapshot } = require('../lib/connex-store'), { processConnexNotifications } = require('../lib/connex-notifications');
+  const now = new Date(); await ingestSnapshot(fixtureDb(records), connexFixture({ createdAt: new Date(+now - 44 * 86400000).toISOString() }));
+  const body = { newAlerts: true, escalations: true, email: true, sms: true, phone: '0412345678' };
+  assert.equal((await request('/connex/notification-preferences', { method: 'PUT', body: JSON.stringify(body) })).status, 200);
+  const sent = [], providers = { sendEmail: async x => sent.push(['email', x]), sms: { sendSms: async x => { sent.push(['sms', x]); return { status: 'queued' }; } } };
+  const db = fixtureDb(records);
+  await processConnexNotifications(db, providers, now); await processConnexNotifications(db, providers, now);
+  assert.equal(sent.length, 2); assert.ok(sent.every(([, value]) => !(value.text || value.body).includes('Fixture Customer')));
+  assert.equal(sent[0][1].to, user.email);
+  assert.equal((await request('/connex/notification-preferences')).body.data.deliveries.length, 2);
+  await ingestSnapshot(db, connexFixture({ recordId: require('../lib/connex-policy').opportunityId('006TJ000013YBIA'), createdAt: new Date(+now + 1000).toISOString() }));
+  await processConnexNotifications(db, providers, new Date(+now + 2000));
+  await processConnexNotifications(db, providers, new Date(+now + 3000));
+  assert.equal(sent.length, 4, 'one new enquiry sends once on each opted-in channel; historical backfill is excluded');
+  const pref = records.integration_sync.find(row => row.kind === 'connex_notification_preferences'); pref.preferences.email = false; pref.preferences.sms = false;
+  await processConnexNotifications(db, providers, new Date(+now + 86400000)); assert.equal(sent.length, 4);
+  user.site = 'South Morang Kia'; assert.equal((await request('/connex/notification-preferences')).status, 403);
+});
 test('Connex baselines do not bulk-write historical outcomes; new allocations queue and stale allocations fail safely', async () => {
   const { ConnexService } = require('../lib/connex-service'), { ingestSnapshot } = require('../lib/connex-store');
   const user = { _id: new ObjectId(), active: true, name: 'Fixture Salesperson', role: 'sales_consultant', site: 'South Morang Hyundai' };

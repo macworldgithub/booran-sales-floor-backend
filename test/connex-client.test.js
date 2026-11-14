@@ -1,6 +1,18 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { ConnexClient, readRecordFields } = require('../lib/connex-client');
+test('an expired session encountered during navigation signs in again and resumes the original record', async () => {
+  const client = new ConnexClient({ writes: true }); let expired = true, signIns = 0; const visited = [];
+  client.page = { goto: async url => visited.push(url), getByPlaceholder: () => ({ waitFor: async () => {}, isVisible: async () => expired }) };
+  client.signIn = async () => { signIns++; expired = false; };
+  await client.navigate('https://connex-hmca.my.site.com/HMCADealerCommunity/s/opportunity/006TJ000013YBI9YAO', { waitFor: async () => {} });
+  assert.equal(signIns, 1); assert.equal(visited.length, 2); assert.equal(visited[0], visited[1]);
+});
+test('open-opportunity discovery survives a capped or unavailable full list', async () => {
+  const client = new ConnexClient({}); const record = { recordId: '006TJ000013YBI9YAO' };
+  client.list = async ({ view } = {}) => { if (view) return { records: [record], complete: true }; throw new Error('full list timeout'); };
+  const result = await client.discover(); assert.equal(result.activeComplete, true); assert.equal(result.complete, false); assert.equal(result.records.length, 1); assert.ok(result.warning);
+});
 test('native Salesforce shadow roots and slotted formatted fields retain source values', () => {
   const text = value => ({ nodeType: 3, textContent: value });
   const element = (tagName, children = [], extra = {}) => ({ nodeType: 1, tagName, childNodes: children, matches: () => false, ...extra });
@@ -26,6 +38,6 @@ test('Connex never reopens an already closed opportunity or performs a write in 
 });
 test('Connex verifies a note marker before deciding whether it must be posted', async () => {
   const client = new ConnexClient({ writes: true });
-  client.read = async () => ({ latestNote: 'Existing note [Sales Floor fixture-note-123]' });
+  client.read = async () => ({ stage: 'Accepted', latestNote: 'Existing note [Sales Floor fixture-note-123]' });
   assert.match((await client.apply({ action: 'note', requestId: 'fixture-note-123' })).latestNote, /fixture-note-123/);
 });

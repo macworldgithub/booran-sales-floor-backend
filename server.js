@@ -31,6 +31,7 @@ const { installSmsNotifications } = require('./lib/sms-notifications');
 const { pollInbound } = require('./lib/inbound-messages');
 const { ConnexService } = require('./lib/connex-service');
 const { installConnex } = require('./lib/connex-routes');
+const { installConnexNotifications, processConnexNotifications } = require('./lib/connex-notifications');
 
 
 require('dotenv').config();
@@ -164,6 +165,7 @@ installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
 installStaffAdmin(router, getFlwupDb, getBooranDb);
 installAllocation(router, getFlwupDb);
 installConnex(router, getFlwupDb, app.locals.connex);
+installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb);
@@ -879,6 +881,7 @@ if (!process.env.VERCEL) {
       if (app.locals.connex.configured) {
         const checkConnex = () => app.locals.connex.run().catch(() => console.warn('Connex worker is temporarily unavailable.'));
         void checkConnex(); interval(checkConnex, 30000);
+        interval(() => database('MONGODB_URI_FLWUP').then(db => processConnexNotifications(db)).catch(() => console.warn('Connex notification check unavailable.')), 60000);
       }
       if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 60000); }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
@@ -905,6 +908,7 @@ if (!process.env.VERCEL) {
       timers.forEach(clearInterval);
       const deadline = setTimeout(() => process.exit(1), 30000).unref();
       server.close(async () => {
+        await app.locals.connex.stop?.().catch(() => {});
         await Promise.allSettled([...clients].map(client => client.close()));
         clearTimeout(deadline);
         process.exit(0);
