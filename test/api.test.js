@@ -8,6 +8,81 @@ const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
 const read = (record, field) => field.split('.').reduce((value, key) => Array.isArray(value) ? value.flatMap(item => item?.[key] === undefined ? [] : item[key]) : value?.[key], record);
 
+const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
+  opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
+test('Connex baselines do not bulk-write historical outcomes; new allocations queue and stale allocations fail safely', async () => {
+  const { ConnexService } = require('../lib/connex-service'), { ingestSnapshot } = require('../lib/connex-store');
+  const user = { _id: new ObjectId(), active: true, name: 'Fixture Salesperson', role: 'sales_consultant', site: 'South Morang Hyundai' };
+  const records = { users: [user] }, db = fixtureDb(records); let writes = 0;
+  const client = { configured: true, settings: { writes: true, detailBatch: 20 }, close: async () => {},
+    apply: async () => { writes++; return connexFixture({ stage: 'Accepted' }); }, list: async () => ({ records: [], complete: true }) };
+  const service = new ConnexService(async () => db, client);
+  await ingestSnapshot(db, connexFixture()); const lead = records.leads[0];
+  lead.status = 'sold'; await service.milestones(db); assert.equal(records.integration_sync.filter(r => r.kind === 'connex_job').length, 0);
+  lead.status = 'following_up'; lead.owner_id = String(user._id); lead.assigned_by = 'manager';
+  await service.milestones(db); const job = records.integration_sync.find(r => r.kind === 'connex_job'); assert.equal(job.payload.action, 'assign');
+  lead.owner_id = String(new ObjectId());
+  await service.run(); assert.equal(writes, 0); assert.equal(job.status, 'needs_attention');
+});
+test('Connex persistent retries retain failed jobs and interrupted notes require review rather than being reposted', async () => {
+  const { ConnexService } = require('../lib/connex-service'), { ingestSnapshot } = require('../lib/connex-store');
+  const records = {}, db = fixtureDb(records); let writes = 0;
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true }, close: async () => {},
+    list: async () => ({ records: [], complete: true }), apply: async () => { writes++; throw new Error('provider unavailable'); } });
+  await ingestSnapshot(db, connexFixture()); const lead = records.leads[0], record = records.integration_sync.find(r => r.kind === 'connex_record');
+  await service.queue(db, lead, record, { action: 'accept', requestId: 'retry-fixture-123' });
+  await service.queue(db, lead, record, { action: 'note', note: 'Test fixture only', requestId: 'note-fixture-123' });
+  const note = records.integration_sync.find(r => r.payload?.action === 'note'); note.status = 'processing'; note.started_at = new Date(0);
+  await service.run(); assert.equal(writes, 1); assert.equal(note.status, 'needs_attention');
+  const retry = records.integration_sync.find(r => r.payload?.action === 'accept'); assert.equal(retry.status, 'retry'); assert.equal(retry.attempts, 1); assert.ok(retry.available_at > new Date());
+});
+test('Connex imports reveal details idempotently, preserve staff decisions and route mobile collisions to merge review', async () => {
+  const { ingestSnapshot, sourceId } = require('../lib/connex-store');
+  const records = {}, db = fixtureDb(records);
+  const masked = connexFixture();
+  await ingestSnapshot(db, masked); await ingestSnapshot(db, masked);
+  assert.equal(records.leads.length, 1); const lead = records.leads[0];
+  assert.equal(String(lead._id), String(sourceId(masked.recordId))); assert.equal(lead.customer_phone, '');
+  await ingestSnapshot(db, connexFixture({ stage: 'Accepted', phone: '0412345678', email: 'fixture@example.test', vehicle: 'Tucson' }));
+  assert.equal(records.leads.length, 1); assert.equal(lead.customer_phone, '+61412345678'); assert.equal(lead.status, 'following_up');
+  lead.customer_name = 'Staff corrected'; lead.status = 'sold'; lead.booran_edited_fields = ['customer_name', 'status'];
+  lead.owner_id = 'staff-owner'; lead.assigned_by = 'manager';
+  await ingestSnapshot(db, connexFixture({ phone: '', name: 'Source name', stage: 'Distributed' }));
+  assert.equal(lead.customer_name, 'Staff corrected'); assert.equal(lead.customer_phone, '+61412345678'); assert.equal(lead.status, 'sold'); assert.equal(lead.owner_id, 'staff-owner');
+  const duplicate = await ingestSnapshot(db, connexFixture({ recordId: '006TJ000013W2CaYAK', phone: '0412345678' }));
+  assert.equal(duplicate.outcome, 'merge_review'); assert.equal(records.leads.length, 1); assert.equal(records.lead_merge_requests.length, 1);
+  await assert.rejects(ingestSnapshot(db, connexFixture({ dealerCode: 'OTHER' })), error => error.code === 'CONNEX_SCOPE');
+});
+test('Connex actions enforce ownership, unique requests, approved loss and persist verified source results', async t => {
+  const { ingestSnapshot } = require('../lib/connex-store');
+  const { request, records, user, app } = await api(t), service = app.locals.connex;
+  user.site = 'South Morang Hyundai';
+  let calls = 0, snapshot = connexFixture();
+  service.client = { configured: true, settings: { writes: true, detailBatch: 20 },
+    apply: async payload => { calls++; snapshot = { ...snapshot, stage: payload.action === 'close_lost' ? 'Closed Lost' : 'Accepted', phone: '0412987654' }; return snapshot; },
+    list: async () => ({ records: [], complete: true }), read: async () => snapshot, close: async () => {} };
+  const imported = await ingestSnapshot(fixtureDb(records), snapshot), lead = records.leads.find(row => String(row._id) === imported.leadId);
+  const path = `/leads/${lead._id}/connex/actions`, input = { action: 'accept', recordId: snapshot.recordId, requestId: 'fixture-accept-123' };
+  let result = await request(path, { method: 'POST', body: JSON.stringify(input) });
+  assert.equal(result.status, 202, result.body.error);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify(input) })).body.data.id, result.body.data.id);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ ...input, action: 'qualify' }) })).status, 409);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ ...input, action: 'close_lost', requestId: 'fixture-loss-123' }) })).status, 409);
+  await service.run(); assert.equal(calls, 1); assert.equal(lead.customer_phone, '+61412987654');
+  assert.equal((await request(`/leads/${lead._id}/connex`)).body.data.jobs[0].status, 'done');
+  user.role = 'sales_consultant'; lead.owner_id = 'another-salesperson';
+  assert.equal((await request(`/leads/${lead._id}/connex`)).status, 404); assert.equal((await request('/connex/status')).status, 403);
+  user.role = 'manager'; user.site = 'South Morang Kia';
+  assert.equal((await request('/connex/status')).status, 403); assert.equal((await request(path, { method: 'POST', body: JSON.stringify(input) })).status, 403);
+});
+test('Connex notification emails queue verified portal reads without creating unverified or duplicate customer records', async () => {
+  const { ingestLeadEmail } = require('../lib/inbound-lead-email');
+  const records = {}, db = fixtureDb(records), message = { messageId: '<connex-fixture@example.test>', html: '<a href="https://connex-hmca.my.site.com/HMCADealerCommunity/s/opportunity/006TJ000013YBI9YAO">Lead</a>' };
+  assert.equal((await ingestLeadEmail(db, 'new', message)).status, 'connex_queued');
+  assert.equal((await ingestLeadEmail(db, 'new', message)).replay, true);
+  assert.equal(records.leads, undefined); assert.equal(records.integration_sync.length, 1);
+});
+
 test('co-located integration state keeps logical ID namespaces, scoped manager reads and Nextgate checkpoints separate', async () => {
   const { withLeadState } = require('../lib/lead-state');
   const { scopedDatabase } = require('../lib/access');

@@ -29,6 +29,8 @@ const { installProspects, businessId } = require('./lib/prospects');
 const { installLeadAlerts, recordAlert, checkAgedLeads } = require('./lib/lead-alerts');
 const { installSmsNotifications } = require('./lib/sms-notifications');
 const { pollInbound } = require('./lib/inbound-messages');
+const { ConnexService } = require('./lib/connex-service');
+const { installConnex } = require('./lib/connex-routes');
 
 
 require('dotenv').config();
@@ -58,12 +60,13 @@ async function database(envKey) {
   return connections.get(envKey);
 }
 
-function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate } = {}) {
+function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
 const app = express();
 if (process.env.TRUST_LOOPBACK_PROXY === 'true') app.set('trust proxy', 'loopback');
 const storage = providedStorage || createMediaStorage(() => resolveDatabase('MONGODB_URI_FLWUP'));
 const nextgate = nexgate || nexgateService(() => resolveDatabase('MONGODB_URI_FLWUP'));
 app.locals.nextgate = nextgate;
+app.locals.connex = connex || new ConnexService(() => resolveDatabase('MONGODB_URI_FLWUP'));
 
 // CORS setup for production (Vercel & Custom Domains)
 app.use(
@@ -160,6 +163,7 @@ installInboundEmailWebhook(router, getFlwupDb);
 installAuth(router, () => resolveDatabase('MONGODB_URI_FLWUP'));
 installStaffAdmin(router, getFlwupDb, getBooranDb);
 installAllocation(router, getFlwupDb);
+installConnex(router, getFlwupDb, app.locals.connex);
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb);
@@ -872,6 +876,10 @@ if (!process.env.VERCEL) {
         void checkSmsReplies(); interval(checkSmsReplies, 30000);
       }
       const checkLeadEmail = () => database('MONGODB_URI_FLWUP').then(db => pollLeadEmail(db)).catch(() => console.warn('Inbound lead email is temporarily unavailable.'));
+      if (app.locals.connex.configured) {
+        const checkConnex = () => app.locals.connex.run().catch(() => console.warn('Connex worker is temporarily unavailable.'));
+        void checkConnex(); interval(checkConnex, 30000);
+      }
       if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 60000); }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
       interval(checkAlerts, HOUR);
