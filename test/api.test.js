@@ -10,6 +10,55 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
+
+test('allocating managers allocate directly to salespeople and are excluded as recipients and daily sales rows', async t => {
+  const { request, records, user } = await api(t); Object.assign(user, { name: 'Quoc Truong', site: 'South Morang Hyundai', role: 'sales_manager', allocation_only: true });
+  const paul = { _id: new ObjectId(), name: 'Paul Daoud', role: 'sales_consultant', site: user.site, active: true }; records.users.push(paul);
+  const created = await request('/leads', { method: 'POST', body: JSON.stringify({ name: 'Routing fixture', dealership: user.site, owner_name: user.name.toUpperCase() }) });
+  assert.equal(created.status, 201, created.body.error); assert.equal(created.body.data.owner_name, 'Unassigned');
+  const path = `/leads/${created.body.data.id}`;
+  assert.equal((await request(path, { method: 'PATCH', body: JSON.stringify({ assignedTo: user.name }) })).status, 400);
+  const assignees = (await request(path + '/assignees')).body.data;
+  assert.ok(assignees.some(person => person.id === String(paul._id))); assert.ok(!assignees.some(person => person.id === String(user._id)));
+  assert.equal((await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(user._id), expectedOwnerId: null }) })).status, 403);
+  const changed = await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(paul._id), expectedOwnerId: null }) });
+  assert.equal(changed.status, 200, changed.body.error); assert.equal(changed.body.data.owner_id, String(paul._id));
+  const entry = records.leads.find(lead => String(lead._id) === created.body.data.id).diary_entries.at(-1);
+  assert.equal(entry.kind, 'assignment'); assert.equal(entry.assignee_id, String(paul._id));
+  const day = (await request('/daily-oversight?rooftop=South%20Morang%20Hyundai&queuePage=1')).body.data.workday;
+  assert.ok(!day.members.some(person => person.name === 'Quoc Truong'));
+  const row = day.members.find(person => person.name === 'Paul Daoud'); assert.equal(row.targets.videosSent, 1); assert.equal(row.signals.videosSent, 'red');
+});
+
+test('allocation-only repair queues only active imported defaults, preserves real allocations and final outcomes, and is repeatable', async () => {
+  const { planAllocationOnlyRouting, applyAllocationOnlyRouting } = require('../lib/allocation-only');
+  const manager = { _id: new ObjectId(), name: 'Allocator fixture', role: 'sales_manager', site: 'South Morang Hyundai', active: true };
+  const base = { owner_id: String(manager._id), owner_name: manager.name, owner_source: 'connex', dealership_name: manager.site, status: 'following_up' };
+  const leads = [ {}, { status: 'sold' }, { status: 'lost' }, { assigned_by: 'real-manager' },
+    { loss_review: { status: 'pending' } }, { booran_edited_fields: ['owner_name'] }, { dealership_name: 'South Morang Kia' } ].map(extra => ({ ...base, ...extra, _id: new ObjectId() }));
+  const records = { users: [manager], leads, sales_tasks: [{ _id: new ObjectId(), lead_id: String(leads[0]._id), dealership: manager.site,
+    assignee_id: String(manager._id), assignee_name: manager.name, status: 'open' }] }, db = fixtureDb(records);
+  const plan = await planAllocationOnlyRouting(db, manager.name, manager.site); assert.equal(plan.leads.length, 1);
+  const result = await applyAllocationOnlyRouting(db, plan); assert.equal(result.returnedToQueue, 1);
+  assert.equal(manager.allocation_only, true); assert.equal(leads[0].owner_id, null); assert.equal(records.sales_tasks[0].assignee_id, null);
+  for (const lead of leads.slice(1)) assert.equal(lead.owner_id, String(manager._id));
+  assert.equal((await applyAllocationOnlyRouting(db, plan)).returnedToQueue, 0);
+  const replay = await planAllocationOnlyRouting(db, manager.name, manager.site); assert.equal(replay.leads.length, 0);
+  const concurrent = { ...base, _id: new ObjectId() }; records.leads.push(concurrent);
+  const nextPlan = await planAllocationOnlyRouting(db, manager.name, manager.site);
+  Object.assign(concurrent, { owner_id: 'paul-fixture', owner_name: 'Paul fixture', assigned_by: 'another-manager', process_revision: 1 });
+  const guarded = await applyAllocationOnlyRouting(db, nextPlan);
+  assert.equal(guarded.returnedToQueue, 0); assert.equal(guarded.skippedConcurrentChanges, 1);
+  assert.equal(concurrent.owner_id, 'paul-fixture');
+});
+
+test('Connex source mapping never imports an allocation-only manager as a sales recipient', async () => {
+  const { ingestSnapshot } = require('../lib/connex-store');
+  const manager = { _id: new ObjectId(), name: 'Allocator fixture', role: 'sales_manager', site: 'South Morang Hyundai', active: true, allocation_only: true };
+  const records = { users: [manager] }, db = fixtureDb(records);
+  await ingestSnapshot(db, connexFixture({ salesperson: manager.name }));
+  assert.equal(records.leads[0].owner_id, null); assert.equal(records.leads[0].owner_name, 'Unassigned');
+});
 test('Connex saved filters and defaults are private to the manager; filters and source export imports remain scoped', async t => {
   const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
   app.locals.connex.client = { configured: true, settings: { writes: true } };
@@ -1103,7 +1152,7 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
   const staff = [
     { name: 'Isaac Bugeja', role: 'sales_consultant', site },
     { name: 'Kris Liberi', role: 'sales_consultant', site },
-    { name: 'Quoc Truong', role: 'sales_manager', site },
+    { name: 'Quoc Truong', role: 'sales_manager', site, allocation_only: true },
     { name: 'George Simogiannis', role: 'sales_consultant', site: 'South Morang Kia' },
     { name: 'First Smith', role: 'sales_consultant', site },
     { name: 'Second Smith', role: 'sales_consultant', site },
@@ -1124,15 +1173,15 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
   const byName = new Map(imported.map(lead => [lead.customer_name, lead]));
   assert.equal(byName.get('Imported 0').owner_id, String(staff[0]._id));
   assert.equal(byName.get('Imported 1').owner_id, String(staff[1]._id));
-  assert.equal(byName.get('Imported 2').owner_id, String(staff[2]._id));
+  assert.equal(byName.get('Imported 2').owner_id, undefined, 'the allocating manager is not an automatic sales recipient');
   for (const index of [3, 4, 5, 6]) assert.equal(byName.get(`Imported ${index}`).owner_id, undefined);
   const dashboard = (await request('/daily-oversight?rooftop=South%20Morang%20Hyundai')).body.data;
   assert.equal(dashboard.summary.activeProspects, 6);
   assert.equal(dashboard.dealerSocket.active, 6);
-  assert.equal(dashboard.dealerSocket.assigned, 3);
+  assert.equal(dashboard.dealerSocket.assigned, 2);
   assert.equal(dashboard.dealerSocket.snapshotAt, snapshot.fetchedAt);
-  assert.ok(dashboard.members.some(person => person.name === 'Quoc Truong' && person.activeProspects === 1));
-  assert.equal(dashboard.unassigned.length, 3, 'ambiguous, other-site and source bucket owners stay in the allocation queue');
+  assert.ok(!dashboard.workday.members.some(person => person.name === 'Quoc Truong'));
+  assert.equal(dashboard.unassigned.length, 4, 'allocating managers, ambiguous, other-site and source bucket owners stay in the allocation queue');
 
   const first = byName.get('Imported 0');
   const second = byName.get('Imported 1');

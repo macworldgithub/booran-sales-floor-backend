@@ -14,7 +14,7 @@ const { createMediaStorage } = require('./lib/mongo-media-storage');
 const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
 const { syncSmsCampaign, resolveSmsCampaignDatabase, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
-const { isManager, canViewCost, canAccessSite } = require('./lib/roles');
+const { isManager, canViewCost, canAccessSite, allocationOnly } = require('./lib/roles');
 const { createUniqueLead, duplicateError, updateUniqueMobile, canonicalLead } = require('./lib/lead-identity');
 const { phoneKey } = require('./lib/phone');
 const { installInboundEmailWebhook, pollLeadEmail, mailboxes } = require('./lib/inbound-lead-email');
@@ -32,6 +32,7 @@ const { pollInbound } = require('./lib/inbound-messages');
 const { ConnexService } = require('./lib/connex-service');
 const { installConnex } = require('./lib/connex-routes');
 const { installConnexNotifications, processConnexNotifications } = require('./lib/connex-notifications');
+const { allocationOnlyName } = require('./lib/allocation-only');
 
 
 require('dotenv').config();
@@ -260,6 +261,8 @@ router.post('/leads', async (req, res) => {
   try {
     if (req.body.status === 'lost') invalid('Submit a loss reason for manager review instead of closing this lead.');
     const newLead = createLead(req.body, req.user);
+    if (allocationOnly(req.user) && newLead.owner_name === req.user.name) newLead.owner_name = 'Unassigned';
+    if (await allocationOnlyName(await getFlwupDb(), newLead.owner_name, newLead.dealership_name)) newLead.owner_name = 'Unassigned';
     newLead.business_id = businessId(newLead.dealership_name, newLead.business_name);
     if (!isManager(req.user) && req.user.role !== 'sales_consultant') return res.sendStatus(403);
     if (req.user.role === 'sales_consultant' || newLead.owner_name === req.user.name) {
@@ -308,6 +311,7 @@ router.patch('/leads/:id', async (req, res) => {
     }
     if (Object.hasOwn(updateDoc.$set, 'owner_name') || Object.hasOwn(updateDoc.$set, 'dealership_name')) {
       if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Only managers can change allocation.' });
+      if (await allocationOnlyName(await getFlwupDb(), updateDoc.$set.owner_name, updateDoc.$set.dealership_name || existingLead.dealership_name)) invalid('Choose a salesperson; allocating managers do not receive leads.');
       const existing = await db.collection('leads').findOne(query);
       if (existing && (existing.source === 'Nextgate' || existing.owner_id)) {
         return res.status(409).json({ success: false, error: 'Use lead allocation to change the assignee of this lead.' });
