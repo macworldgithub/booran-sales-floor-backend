@@ -41,6 +41,7 @@ test('Connex imports reveal details idempotently, preserve staff decisions and r
   const records = {}, db = fixtureDb(records);
   const masked = connexFixture();
   await ingestSnapshot(db, masked); await ingestSnapshot(db, masked);
+  await ingestSnapshot(db, { ...masked, recordId: masked.recordId.slice(0, 15) });
   assert.equal(records.leads.length, 1); const lead = records.leads[0];
   assert.equal(String(lead._id), String(sourceId(masked.recordId))); assert.equal(lead.customer_phone, '');
   await ingestSnapshot(db, connexFixture({ stage: 'Accepted', phone: '0412345678', email: 'fixture@example.test', vehicle: 'Tucson' }));

@@ -4,6 +4,8 @@ const { opportunityId, opportunityUrl, portalDate, nextBusinessDeadline, attenti
 const id = '006TJ000013YBI9YAO';
 test('Connex references reject lookalike hosts, credentials, other routes and malformed identifiers', () => {
   assert.equal(opportunityId(opportunityUrl(id)), id);
+  assert.equal(opportunityId(id.slice(0, 15)), id, 'short and case-safe source references have one identity');
+  assert.equal(opportunityId(id.slice(0, 15) + 'AAA'), null, 'invalid source checksums are rejected');
   for (const value of ['006bad', `http://connex-hmca.my.site.com/HMCADealerCommunity/s/opportunity/${id}`,
     `https://connex-hmca.my.site.com.evil.test/HMCADealerCommunity/s/opportunity/${id}`,
     `https://attacker@connex-hmca.my.site.com/HMCADealerCommunity/s/opportunity/${id}`,
