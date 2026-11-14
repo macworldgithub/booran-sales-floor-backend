@@ -24,6 +24,19 @@ test('lead status returns only scoped feed checkpoints without enquiry history o
   assert.ok(JSON.stringify(result.body).length<2000);
 });
 
+test('Connex common views paginate without losing global facets or filtering across pages', async t => {
+  const {request,records,user}=await api(t);user.site='South Morang Hyundai';
+  records.integration_sync=Array.from({length:45},(_,i)=>({_id:`page-${i}`,kind:'connex_record',dealership:user.site,recordId:`fixture-${String(i).padStart(2,'0')}`,
+    snapshot:connexFixture({recordId:`fixture-${i}`,createdAt:new Date(Date.UTC(2026,0,i+1)).toISOString(),stage:i<25?'Distributed':'Closed Won',type:i===0?'Finance':'Website',salesperson:i===0?'Paul Daoud':''})}));
+  let result=await request('/connex/records?page=2');assert.equal(result.body.pagination.total,45);assert.equal(result.body.data.length,20);
+  assert.equal(result.body.data[0].recordId,'fixture-24');assert.deepEqual(result.body.facets.types,['Finance','Website']);
+  result=await request('/connex/records?view=open&page=2');assert.equal(result.body.pagination.total,25);assert.equal(result.body.data.length,5);
+  assert.ok(result.body.data.every(row=>row.snapshot.stage==='Distributed'));
+  result=await request('/connex/records?view=open&stage=Closed%20Won');assert.equal(result.body.pagination.total,0);
+  result=await request('/connex/records?salesperson=Unassigned');assert.equal(result.body.pagination.total,44);
+  result=await request('/connex/records?type=Finance');assert.equal(result.body.pagination.total,1);assert.equal(result.body.data[0].snapshot.salesperson,'Paul Daoud');
+});
+
 test('allocating managers allocate directly to salespeople and are excluded as recipients and daily sales rows', async t => {
   const { request, records, user } = await api(t); Object.assign(user, { name: 'Quoc Truong', site: 'South Morang Hyundai', role: 'sales_manager', allocation_only: true });
   const paul = { _id: new ObjectId(), name: 'Paul Daoud', role: 'sales_consultant', site: user.site, active: true }; records.users.push(paul);
