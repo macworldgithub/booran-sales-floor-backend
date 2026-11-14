@@ -100,6 +100,17 @@ test('a failed database checkpoint cannot permanently latch the Connex worker as
   await service.run(); assert.equal(service.running, false); assert.ok(service.lastFailure);
   const status = await service.status(db); assert.equal(status.running, false); assert.equal(status.errorCode, 'CONNEX_TIMEOUT');
 });
+
+test('failed first-time Connex reads are visible before a successful read checkpoint exists', async () => {
+  const { ConnexService } = require('../lib/connex-service');
+  const candidate = { _id: 'connex:candidate:first', kind: 'connex_candidate', dealership: 'South Morang Hyundai',
+    last_read_at: new Date(0), read_attempts: 1, error: 'Source read needs retry.' };
+  const db = fixtureDb({ integration_sync: [candidate] });
+  const service = new ConnexService(async () => db, { configured: true, settings: { writes: true } });
+  assert.equal((await service.status(db)).failedPulls, 1);
+  candidate.error = null; candidate.read_attempts = 0;
+  assert.equal((await service.status(db)).failedPulls, 0);
+});
 test('Connex manager approval retains the selected source loss category for the automatic outcome', async t => {
   const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
   app.locals.connex.client = { configured: true, settings: { writes: true } };

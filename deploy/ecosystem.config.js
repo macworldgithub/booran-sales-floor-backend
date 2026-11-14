@@ -14,7 +14,7 @@ function app(name, cwd, script, env, killTimeout) {
     instances: 1,
     exec_mode: 'fork',
     watch: false,
-    max_memory_restart: '512M',
+    max_memory_restart: name === 'booran-sales-floor-backend' ? '768M' : '512M',
     // Collect the backend heap before PM2's RSS limit interrupts long source pulls.
     ...(name === 'booran-sales-floor-backend' ? { node_args: ['--max-old-space-size=256'] } : {}),
     min_uptime: '10s',
