@@ -47,7 +47,7 @@ async function database(envKey, lane = 'application') {
     const uri = process.env[envKey];
     if (!uri) throw new Error(`${envKey} is not configured`);
     const client = new MongoClient(uri, {
-      maxPoolSize: lane === 'connex' ? 4 : process.env.VERCEL ? 5 : 20,
+      maxPoolSize: lane === 'connex' ? 4 : lane === 'imports' ? 2 : process.env.VERCEL ? 5 : 20,
       maxIdleTimeMS: 60000, waitQueueTimeoutMS: 5000, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000,
       compressors: ['zlib'], zlibCompressionLevel: 3,
     });
@@ -195,7 +195,10 @@ router.get('/messaging/status', require('./lib/workflow-route').route(async (req
 router.get('/integrations/lead-status', require('./lib/workflow-route').route(async (req, res) => {
   if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Integration status requires a manager account.' });
   const db = await getFlwupDb(req);
-  const states = await db.collection('integration_sync').find({}).toArray();
+  const fields = ['kind', 'dealership', 'address', 'sourceRecords', 'sourceActive', 'sourceMissingOwner', 'customers', 'missingPhone', 'missingEmail', 'last_success', 'snapshotAt', 'error'];
+  const states = (await db.collection('integration_sync').find({ kind: { $in: ['dealersocket', 'inbound_email'] } },
+    { projection: Object.fromEntries(fields.map(field => [field, 1])) }).toArray())
+    .map(row => Object.fromEntries(fields.filter(field => row[field] !== undefined).map(field => [field, row[field]])));
   const email = canAccessSite(req.user, 'South Morang Hyundai') ? await Promise.all(mailboxes().map(async inbox => {
     const receipts = db.collection('lead_email_receipts');
     const [imported, pendingMerges, needsReview] = await Promise.all(['imported', 'merge_review', 'needs_review'].map(status =>
@@ -863,7 +866,7 @@ if (!process.env.VERCEL) {
           if (campaignSyncRunning) return;
           campaignSyncRunning = true;
           try {
-            const target = await database('MONGODB_URI_FLWUP');
+            const target = await database('MONGODB_URI_FLWUP', 'imports');
             const source = await resolveSmsCampaignDatabase(target, database);
             const result = await syncSmsCampaign(target, source);
             for (const [source, outcome] of Object.entries(result)) {

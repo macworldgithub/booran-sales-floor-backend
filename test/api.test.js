@@ -11,6 +11,19 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
 
+test('lead status returns only scoped feed checkpoints without enquiry history or internal state', async t => {
+  const {request,records,user}=await api(t);user.site='South Morang Hyundai';
+  records.integration_sync=[{_id:'feed',kind:'dealersocket',dealership:user.site,sourceRecords:123,lease_token:'private-control',snapshot:{name:'Private customer'}},
+    {_id:'email',kind:'inbound_email',dealership:user.site,address:'fixture@example.test',last_uid:42},
+    {_id:'other',kind:'dealersocket',dealership:'South Morang Kia',sourceRecords:456},
+    ...Array.from({length:2000},(_,i)=>({_id:`record-${i}`,kind:'connex_record',dealership:user.site,snapshot:{name:'Private customer'}}))];
+  const result=await request('/integrations/lead-status?rooftop=South%20Morang%20Hyundai');
+  assert.equal(result.status,200);assert.equal(result.body.data.states.length,2);
+  assert.equal(result.body.data.states[0].sourceRecords,123);
+  for(const value of ['Private customer','private-control','last_uid','South Morang Kia'])assert.ok(!JSON.stringify(result.body).includes(value),value);
+  assert.ok(JSON.stringify(result.body).length<2000);
+});
+
 test('allocating managers allocate directly to salespeople and are excluded as recipients and daily sales rows', async t => {
   const { request, records, user } = await api(t); Object.assign(user, { name: 'Quoc Truong', site: 'South Morang Hyundai', role: 'sales_manager', allocation_only: true });
   const paul = { _id: new ObjectId(), name: 'Paul Daoud', role: 'sales_consultant', site: user.site, active: true }; records.users.push(paul);
