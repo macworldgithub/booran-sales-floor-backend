@@ -33,6 +33,8 @@ Queue, candidate, baseline, mapping and synchronization documents live in the ex
 
 Only an exact final source list count marks list coverage complete. A `50+`/truncated list is visibly incomplete and never causes CRM deletions. Partial detail failures are counted separately. Missing source records are not retired automatically. Acceptance is due by the end of the next Melbourne weekday; the helper supports an excluded-date calendar, but public-holiday configuration is not exposed in this version. Escalations use 3 and 42 elapsed days.
 
+The 14 November server dry run successfully read a revealed Finance opportunity with all five customer/contact/vehicle/salesperson presence checks. All Opportunities returned 2,000 distinct references, but the portal did not expose an exact final count, so historical list coverage remains explicitly unconfirmed. Discovery is sorted newest first and detail reads prioritize those opportunities. Confirm older history against a Connex export or an approved provider feed before claiming a complete historical migration.
+
 ## Verification limits
 
 Live inspection confirmed sign-in, masked and revealed records, All Opportunities, Accept/Update/Close/New Note controls, salesperson lookup separation, available status and loss-reason choices. Existing source records were not changed during this inspection. Fixture tests cover CRM idempotency, reveal/update, protected edits, duplicate phones, authentication/scope, approval gates, queues and retries. A real write must still be confirmed against a designated disposable Connex opportunity; a production customer must not be used merely as a test.

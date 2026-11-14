@@ -1,6 +1,14 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { ConnexClient } = require('../lib/connex-client');
+const { ConnexClient, readRecordFields } = require('../lib/connex-client');
+test('native Salesforce shadow roots and slotted formatted fields retain source values', () => {
+  const text = value => ({ nodeType: 3, textContent: value });
+  const element = (tagName, children = [], extra = {}) => ({ nodeType: 1, tagName, childNodes: children, matches: () => false, ...extra });
+  const formatted = element('LIGHTNING-FORMATTED-TEXT', [], { shadowRoot: { childNodes: [text('H3752V')] } });
+  const slot = element('SLOT', [], { assignedNodes: () => [formatted] });
+  const value = element('SPAN', [slot]), label = { textContent: 'Dealer Code', closest: () => ({ querySelector: () => value }) };
+  assert.equal(readRecordFields([label])['Dealer Code'], 'H3752V');
+});
 test('Connex refuses a save when a dependent status picklist ignores the selected option', async () => {
   const client = new ConnexClient({ writes: true }); let clicked = false;
   client.page = { getByRole: () => ({ filter: () => ({ getByRole: () => ({ click: async () => { clicked = true; } }) }) }) };
