@@ -13,6 +13,24 @@ test('open-opportunity discovery survives a capped or unavailable full list', as
   client.list = async ({ view } = {}) => { if (view) return { records: [record], complete: true }; throw new Error('full list timeout'); };
   const result = await client.discover(); assert.equal(result.activeComplete, true); assert.equal(result.complete, false); assert.equal(result.records.length, 1); assert.ok(result.warning);
 });
+
+test('a persistent list spinner retains partial references and yields to detail work', async () => {
+  const client = new ConnexClient({ maxRecords: 10000 }); let reads = 0;
+  const chain = { click: async () => {}, waitFor: async () => {}, filter() { return this; }, first() { return this; }, count: async () => 0 };
+  const table = { ...chain, locator: () => chain, evaluate: async fn => {
+    if (!String(fn).includes('const headers')) return;
+    reads++; return [{ url: 'https://connex-hmca.my.site.com/HMCADealerCommunity/s/opportunity/006TJ000013YBI9YAO', opportunityName: 'fixture', fields: {} }];
+  } };
+  const counts = { ...chain, count: async () => 1, innerText: async () => '50+ items' }; counts.first = () => counts;
+  const tables = { ...chain, first: () => table };
+  const spinner = { ...chain, evaluateAll: async () => true };
+  client.open = async () => ({ getByRole: () => chain, getByText: () => chain, waitForTimeout: async () => {},
+    locator: selector => selector === 'table' ? tables : selector === '.countSortedByFilteredBy' ? counts : spinner });
+  client.navigate = async () => {};
+  const result = await client.list({ view: '3. Open' });
+  assert.equal(result.records.length, 1); assert.equal(result.complete, false);
+  assert.ok(reads < 30, `stalled discovery used ${reads} reads`);
+});
 test('native Salesforce shadow roots and slotted formatted fields retain source values', () => {
   const text = value => ({ nodeType: 3, textContent: value });
   const element = (tagName, children = [], extra = {}) => ({ nodeType: 1, tagName, childNodes: children, matches: () => false, ...extra });

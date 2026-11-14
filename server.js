@@ -40,25 +40,26 @@ if (require.main === module && !process.env.VERCEL) require('./lib/nexgate-clien
 // Reuse a connected pool and its in-flight promise across serverless requests.
 const connections = new Map();
 const clients = new Set();
-async function database(envKey) {
-  if (!connections.has(envKey)) {
+async function database(envKey, lane = 'application') {
+  const key = `${envKey}:${lane}`;
+  if (!connections.has(key)) {
     const uri = process.env[envKey];
     if (!uri) throw new Error(`${envKey} is not configured`);
     const client = new MongoClient(uri, {
-      maxPoolSize: process.env.VERCEL ? 5 : 20,
+      maxPoolSize: lane === 'connex' ? 4 : process.env.VERCEL ? 5 : 20,
       maxIdleTimeMS: 60000, waitQueueTimeoutMS: 5000, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000,
       compressors: ['zlib'], zlibCompressionLevel: 3,
     });
     clients.add(client);
     const pending = client.connect().then(() => envKey === 'MONGODB_URI_FLWUP' ? withLeadState(client.db()) : client.db()).catch(async (error) => {
-      connections.delete(envKey);
+      connections.delete(key);
       clients.delete(client);
       await client.close().catch(() => {});
       throw error;
     });
-    connections.set(envKey, pending);
+    connections.set(key, pending);
   }
-  return connections.get(envKey);
+  return connections.get(key);
 }
 
 function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
@@ -67,7 +68,8 @@ if (process.env.TRUST_LOOPBACK_PROXY === 'true') app.set('trust proxy', 'loopbac
 const storage = providedStorage || createMediaStorage(() => resolveDatabase('MONGODB_URI_FLWUP'));
 const nextgate = nexgate || nexgateService(() => resolveDatabase('MONGODB_URI_FLWUP'));
 app.locals.nextgate = nextgate;
-app.locals.connex = connex || new ConnexService(() => resolveDatabase('MONGODB_URI_FLWUP'));
+// Keep durable source progress independent of busy dashboard/import request pools.
+app.locals.connex = connex || new ConnexService(() => resolveDatabase('MONGODB_URI_FLWUP', 'connex'));
 
 // CORS setup for production (Vercel & Custom Domains)
 app.use(

@@ -31,6 +31,8 @@ Manual sync resumes backfill and retries failed reads; it does not reset all suc
 
 Live investigation also found PM2 repeatedly restarting the backend at its 512 MB RSS limit during discovery. The backend now limits its V8 old heap to 256 MB so garbage collection runs before that process limit. Notification scans skip work when no staff have opted in and only fetch owners for linked source records.
 
+The source worker uses a separate four-connection database pool so dashboard/import activity cannot exhaust its connections. Each native list has a 90-second scan budget; a spinner with no newly discovered IDs yields a partial list after 20 passes, allowing saved detail work to continue. Neither timeout nor spinner fallback marks history complete.
+
 Discovery reads the **3. Open** view first, then **All Opportunities**, deduplicating IDs. This prioritizes active enquiries even when the full list is capped. A failed view retains other discovered enquiries. Complete historical coverage still requires an authoritative count/export; the manager can upload source IDs from a Connex CSV export for verified retrieval beyond the list cap.
 
 ## Data integrity and recovery
