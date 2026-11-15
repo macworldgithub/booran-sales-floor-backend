@@ -490,10 +490,15 @@ test('MongoDB videos uploaded before per-file chunk sizes remain readable across
   const records = {}, storage = createMongoMediaStorage(async () => fixtureDb(records));
   const media = { _id: new ObjectId(), size: 2 * 1024 * 1024 + 4 };
   const bytes = Buffer.alloc(media.size, 8); bytes[media.size - 1] = 9;
-  await storage.uploadChunk(media, 0, bytes.subarray(0, 2 * 1024 * 1024));
-  await storage.uploadChunk(media, 2 * 1024 * 1024, bytes.subarray(2 * 1024 * 1024));
+  records.message_media_chunks = [
+    { _id: `${media._id}:0`, index: 0, size: 2 * 1024 * 1024, data: bytes.subarray(0, 2 * 1024 * 1024) },
+    { _id: `${media._id}:1`, index: 1, size: 4, data: bytes.subarray(2 * 1024 * 1024) },
+  ];
   await storage.complete(media);
   assert.deepEqual(await storage.readRange(media, 2 * 1024 * 1024 - 2, media.size - 1), bytes.subarray(2 * 1024 * 1024 - 2));
+  await assert.rejects(storage.prepare(media), { status: 503 });
+  await assert.rejects(storage.uploadChunk(media, 0, bytes.subarray(0, 2 * 1024 * 1024)), { status: 503 });
+  assert.equal(records.message_media_chunks.length, 2);
 });
 
 test('numeric DealerSocket IDs and numbered stages import verified email and protect it on empty source replays', async () => {
@@ -1861,28 +1866,29 @@ test('lead numbers can be added, edited and cleared without changing historic SM
   assert.equal(result.body.data.phone, '');
 });
 
-test('MongoDB media uploads produce a real viewer and bounded binary photo/video ranges', async (t) => {
+test('existing MongoDB media retains its viewer and bounded ranges while new chunk writes are rejected', async (t) => {
   const { createMediaStorage } = require('../lib/mongo-media-storage');
   const chunks = {};
-  const storage = createMediaStorage(async () => fixtureDb(chunks), 'mongodb');
+  const { createLocalStorage } = require('../lib/media-storage');
+  const storage = createMediaStorage(async () => fixtureDb(chunks), { localStorage: createLocalStorage({ serverless: true }) });
   const { request, records, baseUrl } = await api(t, { storage });
   const lead = records.leads[0];
   const length = 2 * 1024 * 1024;
   const bytes = Buffer.alloc(length + 10, 255); bytes[0] = 0; bytes[length + 9] = 128;
   const prepared = await request(`/leads/${lead._id}/media`, { method: 'POST', body: JSON.stringify({ name: 'vehicle.mp4', content_type: 'video/mp4', size: bytes.length }) });
-  assert.equal(prepared.status, 201);
-  assert.equal(records.message_media[0].storage_backend, 'mongodb');
-  const contentPath = `/leads/${lead._id}/media/${prepared.body.data.id}/content`;
-  const url = `${baseUrl}/media/${records.message_media[0].share_token}`;
-  assert.equal((await fetch(url)).status, 404);
-  const chunkSize = prepared.body.data.upload.chunk_size;
-  assert.equal(chunkSize, 256 * 1024);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: Buffer.alloc(chunkSize, 0), headers: { 'content-type': 'application/octet-stream' } })).status, 409);
-  assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 400);
-  for (let offset = chunkSize; offset < bytes.length; offset += chunkSize) assert.equal((await request(contentPath + `?offset=${offset}`, { method: 'PUT', body: bytes.subarray(offset, offset + chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 200);
-  assert.equal((await request(`/leads/${lead._id}/media/${prepared.body.data.id}/complete`, { method: 'POST', body: '{}' })).status, 200);
+  assert.equal(prepared.status, 503);
+  assert.equal(records.message_media?.length || 0, 0);
+  const id = new ObjectId();
+  const chunkSize = 256 * 1024;
+  const media = { _id: id, lead_id: String(lead._id), dealership_name: lead.dealership_name, name: 'vehicle.mp4',
+    content_type: 'video/mp4', size: bytes.length, storage_backend: 'mongodb', storage_chunk_size: chunkSize,
+    status: 'ready', share_token: 'ab'.repeat(32) };
+  records.message_media = [media];
+  chunks.message_media_chunks = Array.from({ length: Math.ceil(bytes.length / chunkSize) }, (_, index) => ({
+    _id: `${id}:${index}`, index, size: Math.min(chunkSize, bytes.length - index * chunkSize), data: bytes.subarray(index * chunkSize, (index + 1) * chunkSize),
+  }));
+  const contentPath = `/leads/${lead._id}/media/${id}/content`;
+  const url = `${baseUrl}/media/${media.share_token}`;
   const viewer = await fetch(url);
   assert.equal(viewer.status, 200);
   const html = await viewer.text();
@@ -1896,5 +1902,7 @@ test('MongoDB media uploads produce a real viewer and bounded binary photo/video
   assert.equal(range.status, 206);
   assert.deepEqual(Buffer.from(await range.arrayBuffer()), bytes.subarray(length - 2));
   assert.equal((await fetch(url + '/content', { headers: { Range: `bytes=${bytes.length}-` } })).status, 416);
-  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, length), headers: { 'content-type': 'application/octet-stream' } })).status, 404);
+  media.status = 'uploading';
+  assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 503);
+  assert.equal(chunks.message_media_chunks.length, Math.ceil(bytes.length / chunkSize));
 });

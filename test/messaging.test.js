@@ -72,6 +72,33 @@ test('local storage rejects path traversal and unavailable Vercel disk', async (
   await assert.rejects(vercel.prepare(fixtureMedia()), { status: 503 });
 });
 
+test('new media always uses persistent files even with legacy MongoDB settings', async (t) => {
+  const { createMediaStorage } = require('../lib/mongo-media-storage');
+  const { storage: disk, directory } = await localStorage(t);
+  const previousMode = process.env.MEDIA_STORAGE_BACKEND;
+  const previousVercel = process.env.VERCEL;
+  t.after(() => {
+    if (previousMode === undefined) delete process.env.MEDIA_STORAGE_BACKEND;
+    else process.env.MEDIA_STORAGE_BACKEND = previousMode;
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
+  });
+  process.env.MEDIA_STORAGE_BACKEND = 'mongodb';
+  const noDatabase = async () => assert.fail('New uploads must never access a chunk collection');
+  const storage = createMediaStorage(noDatabase, { localStorage: disk });
+  const media = fixtureMedia();
+  await storage.prepare(media);
+  assert.equal(media.storage_backend, 'local');
+  await storage.uploadChunk(media, 0, Buffer.from('abcdef'));
+  await storage.complete(media);
+  const restarted = createMediaStorage(noDatabase, { localStorage: createLocalStorage({ directory, serverless: false }) });
+  assert.equal(await fs.readFile(await restarted.download(media), 'utf8'), 'abcdef');
+  process.env.VERCEL = '1';
+  const serverless = createMediaStorage(noDatabase);
+  assert.equal(serverless.configured(), false);
+  await assert.rejects(serverless.prepare(fixtureMedia()), { status: 503 });
+});
+
 test('Australian recipient numbers are normalised and malformed/non-mobile numbers rejected', () => {
   for (const input of ['0412 345 678', '+61 412 345 678', '61412345678', '(04)1234-5678', '412345678']) assert.equal(normalisePhone(input), '+61412345678');
   for (const input of ['', '0312345678', '+14123456789', '04123456789', '+61+412345678', {}, null]) assert.throws(() => normalisePhone(input), { status: 400 });
