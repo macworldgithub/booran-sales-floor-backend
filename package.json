@@ -15,7 +15,9 @@
     "sync:inventory": "node scripts/ingest-csv.js",
     "sync:watch": "node scripts/ingest-csv.js --watch",
     "sync:flwup": "node scripts/sync-flwup.js",
-    "sync:nexgate": "node scripts/import-nexgate.js"
+    "sync:nexgate": "node scripts/import-nexgate.js",
+    "migrate:iappraise": "node scripts/import-iappraise.js",
+    "backup:data": "node scripts/snapshot-data.js"
   },
   "repository": {
     "type": "git",

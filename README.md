@@ -1,5 +1,9 @@
 # Booran Sales Floor API
 
+## Booran Appraisals and legacy archive
+
+The appraisal workspace adds scoped dealer/wholesaler contacts, received wholesale offers, final valuations, optimistic revision checks and a manager-only historical archive. Existing inspections, private photos, PPSR, deals and delivery workflows remain customer-linked. See [migration and coverage documentation](docs/iappraise-migration.md) for the importer, source limitations, persistent media storage and cutover prerequisites. `npm run migrate:iappraise -- /private/bundle/manifest.json` validates by default; `--apply` imports after validation. `npm run backup:data -- /private/new-backup-directory` exports both configured databases without deleting data.
+
 Express API for the Next.js sales-floor frontend. Supports Vercel's Node.js function entry point at `api/index.js` and a standalone local server.
 
 ## Production VPS

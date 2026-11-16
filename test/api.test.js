@@ -6,6 +6,68 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('appraisal centre enforces dealership and consultant boundaries, preserves offers on update and rejects stale decisions', async t => {
+  const { request, records, user } = await api(t);
+  const lead = records.leads[0], id = new ObjectId();
+  records.appraisals = [{ _id: id, lead_id: String(lead._id), dealership: lead.dealership_name, owner_id: String(user._id), rego: 'ABC123', revision: 0, workflow_status: 'ready', offers: [], offer_requests: [], createdAt: new Date().toISOString() },
+    { _id: new ObjectId(), dealership: 'Booran Cheltenham', rego: 'PRIVATE', owner_id: 'other', source_snapshot: { secret: true } }];
+  const post = (path, body) => request(path, { method: 'POST', body: JSON.stringify(body) });
+  const base = `/appraisals/${id}`;
+  const partner = await post('/appraisal-partners', { dealership: lead.dealership_name, kind: 'wholesaler', name: 'Fixture wholesale', email: 'buyer@example.test' });
+  assert.equal(partner.status, 201, partner.body.error);
+  const partnerId = String(partner.body.data._id);
+  assert.equal((await post('/appraisal-partners', { dealership: 'Booran Cheltenham', kind: 'dealer', name: 'Other site' })).status, 403);
+  assert.equal((await request('/appraisals')).body.pagination.total, 1);
+  assert.equal((await request(`/appraisals/${records.appraisals[1]._id}`)).status, 404);
+  assert.equal((await post(base + '/offer-requests', { partnerId })).status, 201);
+  assert.equal((await post(base + '/offer-requests', { partnerId })).status, 200);
+  assert.equal(records.appraisals[0].offer_requests.length, 1);
+  const offer = { requestId: 'a'.repeat(36), partnerId, amountCents: 1200000, notes: 'Inspected by buyer' };
+  assert.equal((await post(base + '/offers', offer)).status, 201);
+  assert.equal((await post(base + '/offers', offer)).status, 200);
+  assert.equal(records.appraisals[0].offers.length, 1);
+  assert.equal((await post(base + '/offers', { ...offer, amountCents: 0 })).status, 409);
+  assert.equal((await post(base + '/final-offer', { offerId: offer.requestId, revision: 0 })).status, 409);
+  const revision = records.appraisals[0].revision;
+  const final = await post(base + '/final-offer', { offerId: offer.requestId, revision });
+  assert.equal(final.status, 200, final.body.error);
+  assert.equal(final.body.data.final_offer.amount_cents, 1200000);
+  assert.equal(final.body.data.workflow_status, 'valued');
+  user.role = 'sales_consultant';
+  const visible = await request(base); assert.equal(visible.status, 200);
+  assert.equal(visible.body.data.offers, undefined); assert.equal(visible.body.data.final_offer, undefined);
+  assert.equal((await post(base + '/offers', offer)).status, 403);
+  lead.owner_id = String(user._id);
+  const history = await request(`/leads/${lead._id}/workflows`); assert.equal(history.status, 200, history.body.error); assert.equal(history.body.data.appraisals[0].offers, undefined);
+  records.appraisals[0].owner_id = 'other'; assert.equal((await request(base)).status, 404);
+  user.role = 'contractor'; assert.equal((await request('/appraisals')).status, 403);
+});
+
+test('legacy archive requires a manager, strips raw snapshots from lists and never crosses dealerships', async t => {
+  const { request, records, user } = await api(t);
+  records.iappraise_archive = [
+    { _id: new ObjectId(), dealership: 'South Morang Kia', kind: 'appraisal', source_id: 'A1', raw: { arbitrary: 'preserved' }, media: [] },
+    { _id: new ObjectId(), dealership: 'Booran Cheltenham', kind: 'dealer', raw: { private: true }, media: [] },
+  ];
+  const result = await request('/iappraise/archive'); assert.equal(result.body.data.length, 1); assert.equal(result.body.data[0].raw, undefined);
+  assert.equal((await request(`/iappraise/archive/${records.iappraise_archive[0]._id}`)).body.data.raw.arbitrary, 'preserved');
+  assert.equal((await request(`/iappraise/archive/${records.iappraise_archive[1]._id}`)).status, 404);
+  user.role = 'sales_consultant'; assert.equal((await request('/iappraise/archive')).status, 403);
+});
+
+test('customer alert categories combine with account scope and reject unsupported categories', async t => {
+  const { request, records, user } = await api(t);
+  records.sales_alerts = [
+    { _id: 'buyer', dealership: 'South Morang Kia', kind: 'high_buyer', owner_id: String(user._id) },
+    { _id: 'risk', dealership: 'South Morang Kia', kind: 'high_risk', owner_id: String(user._id) },
+    { _id: 'outside', dealership: 'Booran Cheltenham', kind: 'high_buyer', owner_id: 'other' },
+  ];
+  const result = await request('/lead-alerts?kind=high_buyer');
+  assert.equal(result.status, 200); assert.equal(result.body.pagination.total, 1); assert.equal(result.body.data[0]._id, 'buyer');
+  assert.equal((await request('/lead-alerts?kind=invalid')).status, 400);
+  user.role = 'contractor'; assert.equal((await request('/lead-alerts')).status, 403);
+});
+
 const read = (record, field) => field.split('.').reduce((value, key) => Array.isArray(value) ? value.flatMap(item => item?.[key] === undefined ? [] : item[key]) : value?.[key], record);
 
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
