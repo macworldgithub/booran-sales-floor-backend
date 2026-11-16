@@ -376,6 +376,31 @@ test('co-located integration state keeps logical ID namespaces, scoped manager r
   assert.equal(records.nexgate_sync[0].lead_id, undefined);
 });
 
+test('co-located appraisal archives support ObjectId reads, idempotent bulk imports and scoped contact updates without changing checkpoints', async () => {
+  const { withLeadState } = require('../lib/lead-state'), { scopedDatabase } = require('../lib/access');
+  const checkpoint = { _id: 'seller-checkpoint', last_success: new Date() };
+  const records = { nexgate_sync: [checkpoint] }, db = withLeadState(fixtureDb(records), 'nexgate_sync');
+  const id = new ObjectId(), site = 'South Morang Kia';
+  const partner = { _id: id, dealership: site, kind: 'dealer', name: 'Fixture dealer', revision: 0 };
+  const inserted = await db.collection('appraisal_partners').insertOne(partner);
+  assert.equal(String(inserted.insertedId), String(id));
+  const archive = { _id: id, dealership: site, kind: 'appraisal', source_sha256: 'fixture', version: 'v1', raw: { original: true } };
+  const operations = [{ updateOne: { filter: { _id: id, version: 'v1' }, update: { $setOnInsert: archive }, upsert: true } }];
+  await db.collection('iappraise_archive').bulkWrite(operations);
+  await db.collection('iappraise_archive').bulkWrite(operations);
+  assert.equal(await db.collection('iappraise_archive').countDocuments({}), 1);
+  assert.equal((await db.collection('iappraise_archive').findOne({ _id: id })).raw.original, true);
+  assert.equal((await db.collection('appraisal_partners').findOne({ _id: id })).name, 'Fixture dealer');
+  assert.equal((await db.collection('iappraise_archive').find({ _id: { $in: [id] } }).sort({ _id: 1 }).limit(2).toArray()).length, 1);
+  const visible = scopedDatabase(db, { id: 'manager', role: 'manager', site });
+  await visible.collection('appraisal_partners').findOneAndUpdate({ _id: id, revision: 0 }, { $set: { name: 'Edited fixture' }, $inc: { revision: 1 } });
+  assert.equal((await visible.collection('appraisal_partners').findOne({ _id: id })).revision, 1);
+  const hidden = scopedDatabase(db, { id: 'manager', role: 'manager', site: 'South Morang Hyundai' });
+  assert.equal(await hidden.collection('iappraise_archive').countDocuments({}), 0);
+  assert.equal(records.nexgate_sync.length, 3); assert.equal(records.nexgate_sync[0], checkpoint);
+  assert.ok(records.nexgate_sync.slice(1).every(row => row._id.startsWith('gs:') && row.gs_state_kind));
+});
+
 test('name and local/international mobile searches find the same scoped customer in both search entry points', async t => {
   const { request, records } = await api(t);
   records.leads[0].customer_name = 'Angela   Pokora';

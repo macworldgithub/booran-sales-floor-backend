@@ -2,6 +2,7 @@
 require('dotenv').config({ quiet: true });
 const { MongoClient } = require('mongodb');
 const { inspectBundle, applyBundle } = require('../lib/iappraise-migration');
+const { withLeadState } = require('../lib/lead-state');
 
 async function main() {
   const args = process.argv.slice(2), apply = args.includes('--apply');
@@ -18,7 +19,7 @@ async function main() {
   const client = new MongoClient(process.env.MONGODB_URI_FLWUP, { serverSelectionTimeoutMS: 10000 });
   try {
     await client.connect();
-    console.log(JSON.stringify(await applyBundle(client.db(), bundle, process.env.IAPPRAISE_ARCHIVE_DIR), null, 2));
+    console.log(JSON.stringify(await applyBundle(withLeadState(client.db()), bundle, process.env.IAPPRAISE_ARCHIVE_DIR), null, 2));
   } finally { await client.close(); }
 }
 main().catch(error => {
