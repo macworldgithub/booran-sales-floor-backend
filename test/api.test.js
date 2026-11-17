@@ -136,6 +136,15 @@ test('completed video events close matching video actions once without completin
   await completeVideoActions(db,String(lead._id),'sent','staff','2026-11-17T01:00:00Z');assert.equal(records.sales_tasks[1].completion_events.length,1);
 });
 
+test('pasted same-customer video links count as sent activity and complete video tasks while foreign links do not',async t=>{
+  const {request,records}=await api(t,{sms:{configured:()=>true,normalisePhone:require('../lib/phone').normalisePhone,sendSms:async()=>({status:'delivered'})}}),lead=records.leads[0];lead.customer_phone='0412345678';
+  const media={_id:new ObjectId(),lead_id:String(lead._id),dealership_name:lead.dealership_name,share_token:'c'.repeat(64),status:'ready',content_type:'video/mp4'};records.message_media=[media];
+  records.sales_tasks=[{_id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,title:'Send customer video',status:'open',createdAt:new Date(Date.now()-60000).toISOString()}];
+  const post=(body,id)=>request(`/leads/${lead._id}/messages`,{method:'POST',body:JSON.stringify({body,media_ids:[],request_id:id})});
+  assert.equal((await post('https://foreign.example/api/media/'+media.share_token,'12345678-1234-1234-1234-123456789abc')).status,201);assert.equal(records.sales_tasks[0].status,'open');
+  assert.equal((await post(require('../lib/customer-messages').shareUrl(media),'22345678-1234-1234-1234-123456789abc')).status,201);assert.equal(records.sales_tasks[0].status,'completed');assert.equal(lead.diary_entries.at(-1).kind,'video_sent');
+});
+
 test('bulk reassignment preserves future diary dates, transfers pending tasks, and refuses stale or out-of-scope rows', async t => {
   const {request,records,user}=await api(t),lead=records.leads[0],paul={_id:new ObjectId(),name:'Paul fixture',active:true,role:'sales_consultant',site:lead.dealership_name};records.users.push(paul);
   Object.assign(lead,{owner_id:String(user._id),next_action:{title:'Later call',due_at:'2026-12-02T00:00:00Z'}});
