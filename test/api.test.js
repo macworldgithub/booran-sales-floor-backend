@@ -2283,3 +2283,19 @@ test('historical closed enquiries still accrue cost but do not attach an active 
   assert.equal(old.holdingCostBreakdown.carsalesLeads, 1); assert.equal(current.holdingCostBreakdown.carsalesLeads, 1);
   assert.deepEqual(customer.engagement_assessment.linkedVehicles, [String(current._id)]);
 });
+
+test('fleet reconciliation reads histories only for active matched prospects, not the historical billing population', async () => {
+  const { refreshInventoryInsights } = require('../lib/inventory-insights');
+  const site = 'South Morang Hyundai', unit = { _id: new ObjectId(), rooftopName: site, stockNumber: 'MATCHED', vehicleCost: 10000, daysInStock: 30 };
+  const active = { _id: new ObjectId(), dealership_name: site, status: 'following_up', nexgate: { seller_id: 'seller', lead_id: 'active', channel: 'carsales', stock_number: 'MATCHED', stage: 'Contacted' } };
+  const old = Array.from({ length: 140 }, (_, i) => ({ _id: new ObjectId(), dealership_name: site, status: 'lost', nexgate: { seller_id: 'seller', lead_id: 'old-' + i, channel: 'carsales', stock_number: 'GONE-' + i } }));
+  const records = { leads: [...old, active], vehicles: [unit] }, raw = fixtureDb(records), historyIds = [], messageIds = [];
+  const db = { collection(name) { const col = raw.collection(name); return { ...col, find(query, options) {
+    if (name === 'leads' && options?.projection?.diary_entries) historyIds.push(...query._id.$in.map(String));
+    if (name === 'customer_messages') messageIds.push(...query.lead_id.$in);
+    return col.find(query, options);
+  } }; } };
+  const result = await refreshInventoryInsights(db, db, new Date('2026-11-17T01:00:00Z'));
+  assert.equal(result.paidLeads, 141); assert.equal(result.matchedPaid, 1); assert.equal(result.assessed, 1);
+  assert.deepEqual(historyIds, [String(active._id)]); assert.deepEqual(messageIds, [String(active._id)]);
+});
