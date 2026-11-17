@@ -22,6 +22,7 @@ if (typeof dns.setServers === 'function') {
   } catch (_) {}
 }
 const { MongoClient } = require('mongodb');
+const { holdingCost, inventoryAdvisory } = require('../lib/inventory-insights');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const CANONICAL_ROOFTOPS = [
@@ -35,7 +36,7 @@ const CANONICAL_ROOFTOPS = [
     pentanaBranchCodes: ['70', 'SMKIA', 'KIA'],
     generalManager: 'Nathan Cole',
     dealerPrincipal: 'David Booran',
-    dailyHoldingCostRate: 0.0003,
+    dailyHoldingCostRate: 0.075 / 365,
     pentanaSourceSystem: 'eraPower',
     websiteUrl: 'https://www.southmorangkia.com.au',
   },
@@ -49,7 +50,7 @@ const CANONICAL_ROOFTOPS = [
     pentanaBranchCodes: ['40', 'MILLPK', 'SMORAN'],
     generalManager: 'Nathan Cole',
     dealerPrincipal: 'David Booran',
-    dailyHoldingCostRate: 0.0003,
+    dailyHoldingCostRate: 0.075 / 365,
     pentanaSourceSystem: 'EraNet',
     websiteUrl: 'https://www.southmoranghyundai.com.au',
   },
@@ -63,7 +64,7 @@ const CANONICAL_ROOFTOPS = [
     pentanaBranchCodes: ['01', 'CHELT', 'CHELTI', 'CHELTH', 'SOCH', 'YYARD', 'IYARD', 'KYARD', 'SYARD', 'TRANSIT', 'DUE', 'SKODA', 'HYARD'],
     generalManager: 'Brett Harrison',
     dealerPrincipal: 'Paul Booran',
-    dailyHoldingCostRate: 0.0003,
+    dailyHoldingCostRate: 0.075 / 365,
     pentanaSourceSystem: 'eraPower',
     websiteUrl: 'https://www.boorancheltenham.com.au',
   },
@@ -77,7 +78,7 @@ const CANONICAL_ROOFTOPS = [
     pentanaBranchCodes: ['20', 'CRANHOL', 'CRAN', 'CYCRANHOL', 'CRCH', 'CYDB'],
     generalManager: 'Sarah Jenkins',
     dealerPrincipal: 'David Booran',
-    dailyHoldingCostRate: 0.0003,
+    dailyHoldingCostRate: 0.075 / 365,
     pentanaSourceSystem: 'eraPower',
     websiteUrl: 'https://www.cranbournehyundai.com.au',
   },
@@ -91,7 +92,7 @@ const CANONICAL_ROOFTOPS = [
     pentanaBranchCodes: ['90', 'BWHY', 'BWMG', 'BWCY', 'HYDB', 'HYDC', 'MGDB', 'MGCRANHOL'],
     generalManager: "Liam O'Connor",
     dealerPrincipal: 'David Booran',
-    dailyHoldingCostRate: 0.0003,
+    dailyHoldingCostRate: 0.075 / 365,
     pentanaSourceSystem: 'eraPower',
     websiteUrl: 'https://www.berwickmg.com.au',
   },
@@ -326,26 +327,13 @@ async function syncCsvData(options = {}) {
         const dateInStock = new Date();
         dateInStock.setDate(dateInStock.getDate() - age);
 
-        const holdingCostRate = 0.0003;
-        const totalStockCost = listPrice;
-        const holdingCostPerDay = Math.round(totalStockCost * holdingCostRate);
-        const accumulatedHoldingCost = Math.round(holdingCostPerDay * age);
+        const rawCost = getVal(['vehicle cost', 'total stock cost', 'purchase price', 'net cost', 'cost']);
+        const parsedCost = rawCost ? Number(rawCost.replace(/[$,\s]/g, '')) : NaN;
+        const totalStockCost = Number.isFinite(parsedCost) && parsedCost >= 0 ? parsedCost : null;
 
         let status = 'IN-STOCK';
         if (rawStatus === 'WHOLESALE') status = 'WHOLESALE';
         else if (rawStatus) status = rawStatus;
-
-        const isOver90 = age > 90;
-        let actionReason = '';
-        let recommendedAction = 'NONE';
-
-        if (isOver90) {
-          actionReason = `Capital trap: ${age} DIS exceeds 90-day wholesale threshold. $${accumulatedHoldingCost} holding cost consumed.`;
-          recommendedAction = 'WHOLESALE';
-        } else if (age > 60 && fileCategory === 'New') {
-          actionReason = `Aging new unit (${age} DIS). Margin compression requires price review.`;
-          recommendedAction = 'PRICE';
-        }
 
         let category = fileCategory;
         if (rawStatus === 'DEMO') category = 'Demo';
@@ -371,8 +359,6 @@ async function syncCsvData(options = {}) {
           vehicleCost: totalStockCost,
           totalStockCost,
           advertisedPrice: listPrice > 0 ? listPrice : null,
-          holdingCostPerDay,
-          accumulatedHoldingCost,
           status,
           dateInStock,
           daysInStock: age,
@@ -381,30 +367,13 @@ async function syncCsvData(options = {}) {
           hasOpenRoPo: openRoPo === 'Y',
           destLoc: loc,
           dealNumber,
-          recommendedAction,
-          actionReason,
           pentanaSource: 'eraPower',
           updatedAt: new Date(),
         };
 
         allVehicles.push(vehicleDoc);
 
-        if (isOver90 || recommendedAction !== 'NONE') {
-          actionItemsToUpsert.push({
-            stockNumber,
-            vin: stockNumber,
-            vehicleTitle: `${year} ${make} ${model}`,
-            actionType: recommendedAction,
-            rooftopId: rooftopInfo.rooftopId,
-            rooftopName: rooftopInfo.rooftopName,
-            targetRooftopName: '',
-            reason: actionReason,
-            impactMetric: isOver90 ? `Free up $${Math.round(totalStockCost)} capital` : 'Align market pricing',
-            priority: isOver90 ? 'high' : 'medium',
-            status: 'open',
-            updatedAt: new Date(),
-          });
-        }
+
       }
     }
 
@@ -420,10 +389,21 @@ async function syncCsvData(options = {}) {
 
     for (let i = 0; i < allVehicles.length; i += batchSize) {
       const batch = allVehicles.slice(i, i + batchSize);
+      const existing = new Map((await db.collection('vehicles').find({ stockNumber: { $in: batch.map(row => row.stockNumber) } },
+        { projection: { stockNumber: 1, vehicleCost: 1, totalStockCost: 1, holdingCostBreakdown: 1, costSource: 1 } }).toArray()).map(row => [row.stockNumber, row]));
       const ops = batch.map((vehicle) => {
-        // Exclude softHold from update so active staff reservations are preserved
+        const previous = existing.get(vehicle.stockNumber) || {};
         const setDoc = { ...vehicle };
         delete setDoc.softHold;
+        if (vehicle.vehicleCost == null) { delete setDoc.vehicleCost; delete setDoc.totalStockCost; }
+        else setDoc.costSource = 'CSV vehicle cost';
+        const calculated = holdingCost({ ...previous, ...setDoc });
+        Object.assign(setDoc, { holdingCostPerDay: calculated.holdingCostPerDay, accumulatedHoldingCost: calculated.accumulatedHoldingCost,
+          holdingCostBreakdown: calculated.holdingCostBreakdown, ...inventoryAdvisory(calculated) });
+        if (setDoc.recommendedAction !== 'NONE') actionItemsToUpsert.push({ stockNumber: vehicle.stockNumber, vin: vehicle.vin,
+          rooftopId: vehicle.rooftopId, rooftopName: vehicle.rooftopName, vehicleTitle: [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' '),
+          actionType: setDoc.recommendedAction, reason: setDoc.actionReason, impactMetric: `Holding cost: ${setDoc.accumulatedHoldingCost == null ? 'incomplete' : '$' + setDoc.accumulatedHoldingCost.toFixed(2)}`,
+          priority: setDoc.recommendedAction === 'WHOLESALE' ? 'high' : 'medium', status: 'open', updatedAt: new Date() });
 
         return {
           updateOne: {

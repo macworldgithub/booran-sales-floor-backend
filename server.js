@@ -29,6 +29,7 @@ const { installSitePresence } = require('./lib/site-presence');
 const { installProspects, businessId } = require('./lib/prospects');
 const { installLeadAlerts, recordAlert, checkAgedLeads } = require('./lib/lead-alerts');
 const { installSmsNotifications } = require('./lib/sms-notifications');
+const { createInventoryInsightsService, decorateVehicleEngagement } = require('./lib/inventory-insights');
 const { pollInbound } = require('./lib/inbound-messages');
 const { ConnexService } = require('./lib/connex-service');
 const { installConnex } = require('./lib/connex-routes');
@@ -48,7 +49,7 @@ async function database(envKey, lane = 'application') {
     const uri = process.env[envKey];
     if (!uri) throw new Error(`${envKey} is not configured`);
     const client = new MongoClient(uri, {
-      maxPoolSize: lane === 'connex' ? 4 : lane === 'imports' ? 2 : process.env.VERCEL ? 5 : 20,
+      maxPoolSize: lane === 'connex' ? 4 : ['imports', 'insights'].includes(lane) ? 2 : process.env.VERCEL ? 5 : 20,
       maxIdleTimeMS: 60000, waitQueueTimeoutMS: 5000, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 10000,
       compressors: ['zlib'], zlibCompressionLevel: 3,
     });
@@ -66,6 +67,13 @@ async function database(envKey, lane = 'application') {
 
 function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
 const app = express();
+const inventoryInsights = createInventoryInsightsService(resolveDatabase);
+app.locals.inventoryInsights = inventoryInsights;
+if (require.main === module && !process.env.VERCEL) app.use((req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode < 300 && ['POST', 'PATCH', 'DELETE'].includes(req.method) && /^\/(?:api\/)?(?:leads(?:\/|$)|appointments|inventory\/|integrations\/nexgate|media\/[^/]+\/events)/.test(req.path)) inventoryInsights.schedule();
+  }); next();
+});
 if (process.env.TRUST_LOOPBACK_PROXY === 'true') app.set('trust proxy', 'loopback');
 const storage = providedStorage || createMediaStorage(() => resolveDatabase('MONGODB_URI_FLWUP'));
 const nextgate = nexgate || nexgateService(() => resolveDatabase('MONGODB_URI_FLWUP'));
@@ -188,7 +196,7 @@ let checkingSmsReplies = false;
 app.locals.checkSmsReplies = async () => {
   if (checkingSmsReplies) return { busy: true };
   checkingSmsReplies = true;
-  try { return await pollInbound({ db: await getFlwupDb(), sms, onInbound: onSmsReply }); }
+  try { const result = await pollInbound({ db: await getFlwupDb(), sms, onInbound: onSmsReply }); if (result.imported) inventoryInsights.schedule(); return result; }
   finally { checkingSmsReplies = false; }
 };
 
@@ -263,6 +271,14 @@ router.get('/leads/:id', async (req, res) => {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
+
+router.get('/leads/:id/engagement', require('./lib/workflow-route').route(async (req, res) => {
+  const db = await getFlwupDb(req);
+  const lead = ObjectId.isValid(req.params.id) && await db.collection('leads').findOne({ _id: new ObjectId(req.params.id), merged_into: { $exists: false } });
+  if (!lead) return res.status(404).json({ success: false, error: 'Customer not found.' });
+  const active = require('./lib/followup-policy').isActiveLead(lead) && lead.sms_campaign?.active !== false;
+  res.json({ success: true, data: { assessment: active ? lead.engagement_assessment || null : null, history: lead.engagement_history || [] } });
+}));
 
 router.post('/leads', async (req, res) => {
   try {
@@ -476,7 +492,7 @@ router.get('/inventory/vehicles', async (req, res) => {
 
     res.json({
       success: true,
-      data: vehicles.map((vehicle) => visibleVehicle(vehicle, req.user, statusByStock.get(String(vehicle._id)))),
+      data: (await decorateVehicleEngagement(vehicles, await getFlwupDb(req))).map((vehicle) => visibleVehicle(vehicle, req.user, statusByStock.get(String(vehicle._id)))),
       pagination: {
         total,
         page,
@@ -507,11 +523,24 @@ router.get('/inventory/vehicles/:id', async (req, res) => {
     }
 
     const [deal] = await stockDeals(req, String(vehicle._id));
-    res.json({ success: true, data: visibleVehicle(vehicle, req.user, deal?.status) });
+    const [decorated] = await decorateVehicleEngagement([vehicle], await getFlwupDb(req));
+    res.json({ success: true, data: visibleVehicle(decorated, req.user, deal?.status) });
   } catch (err) {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }
 });
+
+router.get('/inventory/vehicles/:id/prospects', require('./lib/workflow-route').route(async (req, res) => {
+  if (req.user.role === 'contractor') return res.status(403).json({ success: false, error: 'A sales account is required.' });
+  const inventory = await getBooranDb(req);
+  const vehicle = ObjectId.isValid(req.params.id) && await inventory.collection('vehicles').findOne({ _id: new ObjectId(req.params.id) });
+  if (!vehicle) return res.status(404).json({ success: false, error: 'Vehicle not found.' });
+  const db = await getFlwupDb(req), query = { merged_into: { $exists: false }, status: { $in: ['new_lead', 'following_up', 'returned'] },
+    'sms_campaign.active': { $ne: false }, 'engagement_assessment.linkedVehicles': String(vehicle._id) };
+  const { page, limit, skip } = pageQuery(req.query, 'leads', 'customer_name');
+  const [leads, total] = await Promise.all([db.collection('leads').find(query, { projection: LEAD_PROJECTION }).sort({ customer_name: 1, _id: 1 }).skip(skip).limit(limit).toArray(), db.collection('leads').countDocuments(query)]);
+  res.json({ success: true, data: leads.map(serializeLead), pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+}));
 
 router.post('/inventory/vehicles/:id/soft-hold', (req, res) => {
   res.status(410).json({ success: false, error: 'New vehicle holds have been retired.' });
@@ -572,6 +601,7 @@ router.patch('/inventory/action-items/:id', async (req, res) => {
     if (!ObjectId.isValid(id)) invalid('Invalid action item ID.');
     const query = { _id: new ObjectId(id) };
     const updateDoc = actionUpdate(req.body, req.user);
+    updateDoc.$set.auto_resolved = false;
 
     const result = await db.collection('actionitems').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Record not found.' });
@@ -818,7 +848,7 @@ router.get('/unified/search', async (req, res) => {
       success: true,
       data: {
         leads: leads.map(serializeLead),
-        vehicles: vehicles.map((vehicle) => visibleVehicle(vehicle, req.user)),
+        vehicles: (await decorateVehicleEngagement(vehicles, await getFlwupDb(req))).map((vehicle) => visibleVehicle(vehicle, req.user)),
         actionItems: actionItems.map(item => visibleAction(item, req.user)),
       },
     });
@@ -851,6 +881,8 @@ if (!process.env.VERCEL) {
     const interval = (work, delay) => timers.push(setInterval(work, delay).unref());
     const server = app.listen(port, host, () => {
       console.log(`Booran Sales Floor API listening on ${host}:${port}`);
+      const refreshInventoryInsights = () => app.locals.inventoryInsights.refresh().catch(() => console.warn('Inventory cost and engagement refresh unavailable.'));
+      void refreshInventoryInsights(); interval(refreshInventoryInsights, 15 * 60 * 1000);
 
       if (app.locals.nextgate.configured) {
         const reconcile = () => app.locals.nextgate.sync().then(result => {

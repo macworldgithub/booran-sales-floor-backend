@@ -986,13 +986,13 @@ function matches(record, query) {
           case '$lt': return actual < expected;
           case '$lte': return actual <= expected;
           case '$ne': return !equal(actual, expected) && !(Array.isArray(actual) && actual.some(item => equal(item, expected)));
-          case '$in': return expected.some((item) => item === null ? actual == null : equal(actual, item));
+          case '$in': return (Array.isArray(actual) ? actual : [actual]).some(value => expected.some((item) => item === null ? value == null : equal(value, item)));
           case '$nin': return expected.every((item) => !equal(actual, item));
           default: throw new Error(`Unimplemented fixture operator ${operator}`);
         }
       });
     }
-    return value === null ? actual == null : equal(actual, value);
+    return value === null ? actual == null : Array.isArray(actual) ? actual.some(item => equal(item, value)) : equal(actual, value);
   });
 }
 // In-memory storage exercises the real Express/auth/scoping/query/validation layers.
@@ -1040,7 +1040,7 @@ function fixtureDb(records) {
           let row = rows.find(candidate => matches(candidate, filter));
           if (!row) {
             if (!upsert) continue;
-            row = { ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++;
+            row = { _id: new ObjectId(), ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++;
           }
           if (Array.isArray(update)) { Object.assign(row, aggregateRows([row], update, records)[0]); continue; }
           for (const [key, value] of Object.entries(update.$set || {})) {
@@ -2188,4 +2188,87 @@ test('existing MongoDB media retains its viewer and bounded ranges while new chu
   media.status = 'uploading';
   assert.equal((await request(contentPath + '?offset=0', { method: 'PUT', body: bytes.subarray(0, chunkSize), headers: { 'content-type': 'application/octet-stream' } })).status, 503);
   assert.equal(chunks.message_media_chunks.length, Math.ceil(bytes.length / chunkSize));
+});
+
+test('inventory insight reconciliation deduplicates paid Nextgate aliases, persists audit signals and obeys current lead and cost scope', async t => {
+  const { refreshInventoryInsights, holdingCost } = require('../lib/inventory-insights');
+  const { request, records, user } = await api(t);
+  const now = new Date('2026-11-17T01:00:00Z'), site = 'South Morang Hyundai';
+  const unit = { _id: new ObjectId(), stockNumber: 'UNIT-1', vin: 'KMHCT41DMCU012345', rooftopName: site, vehicleCost: 36500,
+    advertisedPrice: 40000, dateInStock: '2026-10-18T01:00:00Z', daysInStock: 30, category: 'Used', status: 'In Stock' };
+  records.vehicles = [unit];
+  const source = { seller_id: 'seller', lead_id: 'one', channel: 'carsales', stock_number: 'UNIT-1', lead_type: 'Web enquiry', created_at: '2026-11-16T01:00:00Z', synced_at: now };
+  const customer = { _id: new ObjectId(), customer_name: 'Linked customer', dealership_name: site, status: 'following_up', owner_id: String(user._id), nexgate: source,
+    diary_entries: [{ author: user.name, author_role: 'sales_consultant', date: '2026-11-16T01:00:00Z', note: 'Ready to buy' }] };
+  const duplicate = { _id: new ObjectId(), merged_into: String(customer._id), dealership_name: site, status: 'following_up', nexgate: { ...source }, source_refs: [{ nexgate: { ...source } }] };
+  const closed = { _id: new ObjectId(), dealership_name: site, status: 'lost', nexgate: { ...source, lead_id: 'two', channel: 'Drive' } };
+  const foreign = { _id: new ObjectId(), dealership_name: 'Booran Cheltenham', status: 'following_up', nexgate: { ...source, lead_id: 'foreign' } };
+  const free = { _id: new ObjectId(), dealership_name: site, status: 'lost', nexgate: { ...source, lead_id: 'free', channel: 'Call connect' } };
+  records.leads = [customer, duplicate, closed, foreign, free];
+  records.customer_messages = [{ _id: 'out', lead_id: String(customer._id), status: 'sent', provider_message_id: 'sent', created_at: '2026-11-16T01:00:00Z' },
+    { _id: 'reply', lead_id: String(customer._id), direction: 'inbound', status: 'received', original_message_id: 'sent', created_at: '2026-11-16T02:00:00Z' }];
+  const db = fixtureDb(records);
+  const result = await refreshInventoryInsights(db, db, now);
+  assert.equal(result.paidLeads, 3); assert.equal(result.matchedPaid, 2); assert.equal(result.unmatchedPaid, 1); assert.equal(result.assessed, 1);
+  assert.equal(unit.holdingCostBreakdown.floorplanCost, 225); assert.equal(unit.holdingCostBreakdown.leadCharges, 130); assert.equal(unit.accumulatedHoldingCost, 355);
+  assert.equal(customer.engagement_assessment.score, 6); assert.equal(duplicate.engagement_assessment, undefined);
+  const audit = (await request(`/leads/${customer._id}/engagement`)).body.data;
+  assert.equal(audit.assessment.signals[0].evidence.length, 2);
+  let response = await request(`/inventory/vehicles/${unit._id}`);
+  assert.equal(response.status, 200); assert.equal(response.body.data.holdingCostBreakdown.leadCharges, 130);
+  assert.equal(response.body.data.accumulatedHoldingCost, holdingCost(unit).accumulatedHoldingCost);
+  assert.equal(response.body.data.engagementSummary.buying, 1);
+  response = await request(`/inventory/vehicles/${unit._id}/prospects`);
+  assert.equal(response.body.pagination.total, 1); assert.equal(response.body.data[0].engagement.score, 6);
+  assert.equal(response.body.data[0].engagement.signals[0].evidence, undefined, 'list rows do not carry full audit evidence');
+  user.role = 'sales_consultant';
+  response = await request(`/inventory/vehicles/${unit._id}`);
+  assert.equal(response.body.data.holdingCostBreakdown, undefined); assert.equal(response.body.data.accumulatedHoldingCost, undefined);
+  customer.owner_id = 'other-person';
+  assert.equal((await request(`/inventory/vehicles/${unit._id}/prospects`)).body.pagination.total, 0);
+  assert.equal((await request(`/inventory/vehicles/${unit._id}`)).body.data.engagementSummary.activeProspects, 0);
+  assert.equal((await request(`/leads/${customer._id}/engagement`)).status, 404);
+  records.customer_messages = []; customer.diary_entries = [{ author: 'Sales', author_role: 'sales_consultant', date: '2026-11-17T00:00:00Z', note: 'Not interested' }];
+  await refreshInventoryInsights(db, db, now);
+  assert.equal(customer.engagement_assessment.state, 'losing'); assert.equal(customer.engagement_history.length, 1); assert.equal(customer.engagement_history[0].score, 6);
+  await refreshInventoryInsights(db, db, now); assert.equal(customer.engagement_history.length, 1, 'unchanged refreshes do not duplicate audit history');
+});
+
+function setFixtureField(record, path, value) {
+  const parts = path.split('.'); let target = record;
+  for (const part of parts.slice(0, -1)) target = target[part] ||= {};
+  target[parts.at(-1)] = value;
+}
+test('paid inventory metadata backfill only enriches verified existing source references and retains staff decisions', async () => {
+  const { backfillInventoryNextgate } = require('../scripts/backfill-inventory-nextgate');
+  const { DEALERSHIPS } = require('../lib/nexgate-client');
+  const seller = DEALERSHIPS[2][1], site = 'South Morang Hyundai';
+  const ref = { seller_id: seller, customer_id: 'customer', lead_id: 'source-lead', channel: 'carsales', stock_number: 'UNIT' };
+  const primary = { _id: new ObjectId(), dealership_name: site, owner_id: 'keep-owner', status: 'following_up', diary_entries: [{ note: 'Keep note' }], source_refs: [{ source: 'DealerSocket' }, { nexgate: ref }] };
+  const retired = { _id: new ObjectId(), dealership_name: site, merged_into: String(primary._id), nexgate: ref };
+  const free = { _id: new ObjectId(), dealership_name: site, nexgate: { ...ref, lead_id: 'free', channel: 'Call connect' } };
+  const records = { leads: [primary, retired, free], vehicles: [{ _id: new ObjectId(), rooftopName: site, stockNumber: 'UNIT' }] }, raw = fixtureDb(records), calls = [];
+  const crm = { collection(name) { const collection = raw.collection(name); return { ...collection,
+    findOneAndUpdate: async (filter, update) => {
+      const row = records.leads.find(row => equal(row._id, filter._id));
+      const at = path => path.split('.').reduce((value, part) => value?.[part], row);
+      if (!row || Object.entries(filter).some(([path, value]) => path !== '_id' && at(path) !== value)) return null;
+      for (const [path, value] of Object.entries(update.$set)) setFixtureField(row, path, value);
+      return row;
+    } }; } };
+  const result = await backfillInventoryNextgate({ crm, inventory: raw, request: async url => { calls.push(url); return { latestLead: { id: 'source-lead', leadCreatedDate: '2026-11-16T00:00:00Z', leadType: 'USED', item: { stockNumber: 'UNIT' } } }; } });
+  assert.equal(result.candidates, 1); assert.equal(result.updatedReferences, 2); assert.equal(result.failed, 0); assert.equal(calls.length, 1);
+  assert.equal(primary.source_refs[1].nexgate.lead_type, 'USED'); assert.equal(retired.nexgate.lead_type, 'USED');
+  assert.equal(primary.owner_id, 'keep-owner'); assert.equal(primary.status, 'following_up'); assert.equal(primary.diary_entries[0].note, 'Keep note'); assert.equal(records.leads.length, 3);
+});
+
+test('holding-cost actions retire when margin recovers and reopen only automatic resolutions', async () => {
+  const { refreshInventoryInsights } = require('../lib/inventory-insights');
+  const unit = { _id: new ObjectId(), rooftopName: 'South Morang Hyundai', stockNumber: 'MARGIN', vehicleCost: 36500, potentialGross: 100, daysInStock: 30, status: 'In Stock' };
+  const records = { vehicles: [unit] }, db = fixtureDb(records), now = new Date('2026-11-17T01:00:00Z');
+  await refreshInventoryInsights(db, db, now); const action = records.actionitems[0]; assert.equal(action.actionType, 'WHOLESALE'); assert.equal(action.status, 'open');
+  unit.potentialGross = 10000; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'resolved'); assert.equal(action.auto_resolved, true);
+  unit.potentialGross = 100; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'open'); assert.equal(action.auto_resolved, false);
+  action.status = 'resolved'; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'resolved', 'manual resolutions stay resolved');
+  action.status = 'in_progress'; unit.potentialGross = 10000; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'in_progress', 'work already under way stays with the manager');
 });
