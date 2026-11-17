@@ -173,6 +173,8 @@ installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb);
+require('./lib/crm-updates').installCrmUpdates(router, getFlwupDb);
+require('./lib/video-library').installVideoLibrary(router, getFlwupDb);
 installDailyOversight(router, getFlwupDb);
 installExternalLeads(router, getFlwupDb);
 installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
@@ -256,7 +258,7 @@ router.get('/leads/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    res.json({ success: true, data: serializeLead(lead) });
+    res.json({ success: true, data: serializeLead(await require('./lib/crm-updates').decorateActivity(await getFlwupDb(), lead)) });
   } catch (err) {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });
   }

@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "git": { "deploymentEnabled": { "feat/smhy-16nov-scope": false } },
   "functions": { "api/index.js": { "maxDuration": 120 } },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
   "crons": [{ "path": "/api/jobs/nexgate", "schedule": "0 * * * *" }]

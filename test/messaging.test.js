@@ -37,7 +37,7 @@ const fixtureMedia = () => ({ name: 'vehicle.mp4', size: 6, content_type: 'video
 test('local files are private until complete and survive creating a new storage instance', async (t) => {
   const { directory, storage } = await localStorage(t);
   const media = fixtureMedia();
-  assert.equal((await storage.prepare(media)).chunk_size, 256 * 1024);
+  assert.equal((await storage.prepare(media)).chunk_size, 2 * 1024 * 1024);
   await assert.rejects(storage.download(media), { status: 404 });
   assert.equal(await storage.uploadChunk(media, 0, Buffer.from([0, 255, 1])), 3);
   await assert.rejects(storage.complete(media), { status: 400 });

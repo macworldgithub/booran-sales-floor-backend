@@ -13,7 +13,7 @@ test('hourly reconciliation only advances successful seller checkpoints and save
       findOne: async query => leads.find(row => String(row._id) === String(query._id)),
       insertOne: async row => { leads.push(row); batches++; return { insertedId: row._id }; },
     };
-    if (name === 'lead_source_links') return { find: () => ({ toArray: async () => [] }) };
+    if (name === 'lead_source_links') return { find: () => ({ toArray: async () => [] }), findOne: async()=>null };
     return {
       async findOneAndUpdate({ _id }, { $set }) {
         const state = { ...checkpoints.get(_id), ...$set };

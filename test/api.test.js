@@ -73,6 +73,117 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
 
+test('out-of-window next actions save once, leave Today, and resolve through scoped manager approval', async t => {
+  const {request,records,user}=await api(t),lead=records.leads[0];Object.assign(lead,{owner_id:String(user._id),owner_name:user.name,created_at:new Date().toISOString()});
+  const post=(path,body)=>request(path,{method:'POST',body:JSON.stringify(body)}), path=`/leads/${lead._id}`;
+  const payload={title:'Call in December',note:'Customer requested a later call',dueAt:new Date(Date.now()+12*86400000).toISOString(),requestId:'12345678-1234-1234-1234-123456789abc'};
+  user.role='sales_consultant';let response=await post(path+'/next-action',payload);assert.equal(response.status,200,response.body.error);
+  assert.equal(response.body.data.next_action_review.status,'pending');assert.equal(records.sales_tasks.length,1);assert.equal(records.sales_tasks[0].status,'awaiting_approval');
+  assert.equal((await post(path+'/next-action',payload)).status,200);assert.equal(records.sales_tasks.length,1);
+  assert.equal((await post(path+'/next-action',{...payload,note:'Different'})).status,409);
+  const reviewId=response.body.data.next_action_review.id;
+  assert.equal((await post(path+'/followup-review',{reviewId,action:'approve'})).status,403);
+  assert.equal((await request('/sales-tasks?status=open')).body.data.length,0);
+  const daily=(await request('/daily-oversight?queuePage=1')).body.data;assert.equal(daily.members[0].todoLeads.length,0);
+  user.role='manager';const queue=(await request('/manager-approvals')).body.data;assert.equal(queue.requests[0].kind,'followup');
+  response=await post(path+'/followup-review',{reviewId,action:'approve'});assert.equal(response.status,200,response.body.error);assert.equal(records.sales_tasks[0].status,'open');
+  assert.equal(response.body.data.next_action.due_at,payload.dueAt);assert.equal(response.body.data.next_action.status,'open');
+  assert.equal((await post(path+'/followup-review',{reviewId,action:'approve'})).status,409);
+  response=await post(path+'/next-action',{...payload,requestId:'22345678-1234-1234-1234-123456789abc'});
+  assert.equal((await post(path+'/followup-review',{reviewId:response.body.data.next_action_review.id,action:'reject',notes:'Call this week instead'})).status,200);
+  assert.ok(records.sales_tasks.some(task=>task.kind==='followup_rejected'&&task.status==='open'));
+  const cancelled=records.sales_tasks.find(task=>task.status==='cancelled');
+  assert.equal((await request(`/sales-tasks/${cancelled._id}`,{method:'PATCH',body:JSON.stringify({status:'open'})})).status,409,'a rejected date cannot bypass review by reopening its task');
+});
+
+test('consent is audited, blocks SMS, and salesperson contact restoration requires manager approval', async t => {
+  let sends=0;const {request,records,user}=await api(t,{sms:{configured:()=>true,normalisePhone:require('../lib/phone').normalisePhone,sendSms:async()=>{sends++;return{status:'queued'};}}});
+  const lead=records.leads[0];Object.assign(lead,{owner_id:String(user._id),customer_phone:'0412345678'});
+  const post=(path,body)=>request(`/leads/${lead._id}/`+path,{method:'POST',body:JSON.stringify(body)});
+  assert.equal((await post('consent',{optOut:true,reason:'Customer requested no contact'})).body.data.opted_out,true);
+  assert.equal((await post('messages',{body:'Fixture message',media_ids:[],request_id:'12345678-1234-1234-1234-123456789abc'})).status,403);assert.equal(sends,0);
+  user.role='sales_consultant';let response=await post('consent',{optOut:false,reason:'Customer asked to resume contact'});assert.equal(response.body.data.opted_out,true);assert.equal(response.body.data.consent_review.status,'pending');
+  assert.equal((await post('consent-review',{reviewId:lead.consent_review.id,action:'approve',notes:'Consent confirmed'})).status,403);
+  user.role='manager';response=await post('consent-review',{reviewId:lead.consent_review.id,action:'approve',notes:'Consent confirmed directly'});assert.equal(response.body.data.opted_out,false);
+  assert.ok(lead.diary_entries.every(entry=>entry.kind==='consent'&&entry.author_role));
+});
+
+test('manager notes retain role badges and retries do not duplicate diary entries', async t => {
+  const {request,records,user}=await api(t),lead=records.leads[0],path=`/leads/${lead._id}/notes`, body={note:'Manager checked this prospect',requestId:'12345678-1234-1234-1234-123456789abc'};
+  const post=value=>request(path,{method:'POST',body:JSON.stringify(value)});
+  assert.equal((await post(body)).status,200);assert.equal((await post(body)).status,200);assert.equal(lead.diary_entries.length,1);assert.equal(lead.diary_entries[0].author_role,user.role);
+  assert.equal((await post({...body,note:'Changed note'})).status,409);
+  user.role='sales_consultant';lead.owner_id=String(user._id);assert.equal((await post({...body,requestId:'22345678-1234-1234-1234-123456789abc'})).status,200);assert.equal(lead.diary_entries[1].author_role,'sales_consultant');
+});
+
+test('the salesperson Today task filter includes overdue work but excludes tomorrow, completed and pending items',async t=>{
+  const {request,records,user}=await api(t),lead=records.leads[0],now=Date.now();
+  records.sales_tasks=[{title:'Overdue',status:'open',due_at:new Date(now-2*86400000).toISOString()},
+    {title:'Tomorrow',status:'open',due_at:new Date(now+2*86400000).toISOString()},
+    {title:'Pending',status:'awaiting_approval',due_at:new Date(now-86400000).toISOString()},
+    {title:'Completed',status:'completed',due_at:new Date(now-86400000).toISOString()}].map(row=>({...row,_id:new ObjectId(),assignee_id:String(user._id),dealership:lead.dealership_name,lead_id:String(lead._id)}));
+  const result=await request('/sales-tasks?status=open&assignee=me&due=today');assert.deepEqual(result.body.data.map(row=>row.title),['Overdue']);
+  assert.equal((await request('/sales-tasks?status=open')).body.data.length,2,'future tasks remain in the full diary');
+});
+
+test('completed video events close matching video actions once without completing calls, pending reviews or newer work',async()=>{
+  const {completeVideoActions}=require('../lib/crm-updates'),lead={_id:new ObjectId(),dealership_name:'South Morang Hyundai',next_action:{title:'Send customer video',recorded_at:'2026-11-16T00:00:00Z',due_at:'2026-11-17T00:00:00Z',status:'open'}},records={leads:[lead]},db=fixtureDb(records);
+  records.sales_tasks=[{title:'Record customer video',status:'open'},{title:'Send customer video',status:'open'},{title:'Call customer',status:'open'},
+    {title:'Send another video',status:'open',createdAt:'2026-11-18T00:00:00Z'},{title:'Send pending video',status:'awaiting_approval'}].map(row=>({_id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,createdAt:'2026-11-16T00:00:00Z',...row}));
+  await completeVideoActions(db,String(lead._id),'uploaded','staff','2026-11-17T00:00:00Z');assert.equal(records.sales_tasks[0].status,'completed');assert.equal(records.sales_tasks[1].status,'open');
+  await completeVideoActions(db,String(lead._id),'sent','staff','2026-11-17T01:00:00Z');assert.equal(records.sales_tasks[1].status,'completed');assert.equal(lead.next_action.status,'completed');
+  for(const index of [2,3])assert.equal(records.sales_tasks[index].status,'open');assert.equal(records.sales_tasks[4].status,'awaiting_approval');
+  await completeVideoActions(db,String(lead._id),'sent','staff','2026-11-17T01:00:00Z');assert.equal(records.sales_tasks[1].completion_events.length,1);
+});
+
+test('bulk reassignment preserves future diary dates, transfers pending tasks, and refuses stale or out-of-scope rows', async t => {
+  const {request,records,user}=await api(t),lead=records.leads[0],paul={_id:new ObjectId(),name:'Paul fixture',active:true,role:'sales_consultant',site:lead.dealership_name};records.users.push(paul);
+  Object.assign(lead,{owner_id:String(user._id),next_action:{title:'Later call',due_at:'2026-12-02T00:00:00Z'}});
+  records.sales_tasks=[{_id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,assignee_id:String(user._id),status:'awaiting_approval',due_at:lead.next_action.due_at}];
+  const post=body=>request('/leads/bulk-assignment',{method:'POST',body:JSON.stringify(body)}),body={leads:[{id:String(lead._id),expectedOwnerId:String(user._id)},{id:String(records.leads[2]._id),expectedOwnerId:null}],assigneeId:String(paul._id)};
+  let result=await post(body);assert.equal(result.status,200,result.body.error);assert.equal(result.body.data.reassigned.length,1);assert.equal(result.body.data.errors.length,1);
+  assert.equal(lead.next_action.due_at,'2026-12-02T00:00:00Z');assert.equal(records.sales_tasks[0].assignee_id,String(paul._id));
+  result=await post(body);assert.equal(result.body.data.reassigned.length,0);assert.equal(result.body.data.errors[0].error,'Assignment changed. Refresh and review.');
+});
+
+test('imported Nextgate and DealerSocket identities attach once; conflicting identities request manager review', async () => {
+  const {createUniqueLead}=require('../lib/lead-identity'),records={},db=fixtureDb(records),primary={_id:new ObjectId(),dealership_name:'South Morang Hyundai',source:'Nexgate',customer_name:'Alex Example',customer_phone:'0412345678',customer_email:'alex@example.test',status:'following_up',owner_id:'salesperson',created_at:'2026-01-01T00:00:00Z'};
+  records.leads=[primary];const incoming={...primary,_id:new ObjectId(),source:'DealerSocket',deal_id:'socket-fixture',customer_phone:'+61412345678',notes:'Source details'};
+  let result=await createUniqueLead(db,incoming,{name:'Fixture importer'},true);assert.equal(result.attached,true);assert.equal(records.leads.length,1);assert.equal(result.lead.owner_id,'salesperson');assert.equal(result.lead.source_refs[0].source,'DealerSocket');
+  const diaryCount=result.lead.diary_entries.length;result=await createUniqueLead(db,incoming,{name:'Fixture importer'},true);assert.equal(result.lead.diary_entries.length,diaryCount);
+  await assert.rejects(createUniqueLead(db,{...incoming,dealership_name:'South Morang Kia'},{name:'Fixture importer'},true),{status:409},'a source alias cannot disclose or move another dealership customer');
+  result=await createUniqueLead(db,{...incoming,_id:new ObjectId(),customer_name:'Another Person'},{name:'Fixture importer'},true);assert.equal(result.duplicate,true);assert.equal(records.leads.length,1);
+  const emailOnly={...incoming,_id:new ObjectId(),customer_phone:''};result=await createUniqueLead(db,emailOnly,{name:'Fixture importer'},true);assert.equal(result.attached,true);
+  records.leads.push({...primary,_id:new ObjectId(),dealership_name:'South Morang Kia'});assert.equal(records.leads.length,2);
+});
+
+test('video views update customer history and notify once, while generic approved clips can be attached without uploading', async t => {
+  const {request,records,user}=await api(t),lead=records.leads[0],media={_id:new ObjectId(),lead_id:String(lead._id),dealership_name:lead.dealership_name,status:'ready',content_type:'video/mp4',name:'Generic welcome',size:10,share_token:'b'.repeat(64),storage_key:'files/123456781234567812345678'};
+  records.message_media=[media];const post=(path,body)=>request(path,{method:'POST',body:JSON.stringify(body)});
+  const event={event:'view',session:'12345678-1234-1234-1234-123456789abc'};
+  assert.equal((await post(`/media/${media.share_token}/events`,event)).status,200);assert.equal((await post(`/media/${media.share_token}/events`,event)).status,200);
+  assert.equal(media.views,1);assert.ok(lead.last_video_viewed_at);assert.equal(records.sales_alerts.filter(row=>row.kind==='video_viewed').length,1);
+  assert.equal(lead.diary_entries.filter(entry=>entry.kind==='video_viewed').length,1);
+  const publish=`/leads/${lead._id}/media/${media._id}/publish-template`;
+  assert.equal((await post(publish,{title:'Welcome clip'})).status,400);
+  assert.equal((await post(publish,{title:'Welcome clip',confirmNoCustomerDetails:true})).status,200);
+  const library=(await request('/video-library')).body.data;assert.equal(library.length,1);
+  const result=await post(`/leads/${lead._id}/video-library/${encodeURIComponent(library[0].id)}/attach`,{});assert.equal(result.status,201,result.body.error);assert.notEqual(result.body.data.url,require('../lib/customer-messages').shareUrl(media));
+  const copied=records.message_media.find(row=>String(row._id)===result.body.data.id);assert.equal(copied.storage_key,media.storage_key);assert.equal(copied.views,0);
+  user.role='sales_consultant';lead.owner_id=String(user._id);assert.equal((await post(publish,{title:'Not approved',confirmNoCustomerDetails:true})).status,403);
+});
+
+test('Connex releases hidden details through the configured manager while preserving platform salesperson ownership', async () => {
+  const {ConnexService}=require('../lib/connex-service'),{ingestSnapshot}=require('../lib/connex-store');
+  const mark={_id:new ObjectId(),name:'Mark Robinson',active:true,role:'sales_manager',site:'South Morang Hyundai'},records={users:[mark]},db=fixtureDb(records),calls=[];
+  const source=connexFixture(),service=new ConnexService(async()=>db,{configured:true,settings:{writes:true},apply:async action=>{calls.push(action);return {...source,phone:'0412345678',salesperson:mark.name,stage:'Accepted'};}});
+  const before=await ingestSnapshot(db,source);records.leads[0].owner_id='salesperson';records.leads[0].owner_name='Paul fixture';
+  const revealed=await service.revealContacts(db,source);assert.equal(calls[0].salesperson,mark.name);assert.equal(calls[0].action,'accept');
+  await ingestSnapshot(db,revealed.snapshot,{preserveOwner:revealed.preserveOwner});assert.equal(records.leads[0].owner_id,'salesperson');assert.equal(records.leads[0].customer_phone,'+61412345678');
+  await ingestSnapshot(db,revealed.snapshot);assert.equal(records.leads[0].owner_id,'salesperson');assert.equal(before.leadId,String(records.leads[0]._id));
+  service.client.settings.writes=false;assert.equal((await service.revealContacts(db,source)).preserveOwner,false);assert.equal(calls.length,1);
+});
+
 test('lead status returns only scoped feed checkpoints without enquiry history or internal state', async t => {
   const {request,records,user}=await api(t);user.site='South Morang Hyundai';
   records.integration_sync=[{_id:'feed',kind:'dealersocket',dealership:user.site,sourceRecords:123,lease_token:'private-control',snapshot:{name:'Private customer'}},
@@ -99,22 +210,22 @@ test('Connex common views paginate without losing global facets or filtering acr
   result=await request('/connex/records?type=Finance');assert.equal(result.body.pagination.total,1);assert.equal(result.body.data[0].snapshot.salesperson,'Paul Daoud');
 });
 
-test('allocating managers allocate directly to salespeople and are excluded as recipients and daily sales rows', async t => {
+test('managers remain eligible for self-assignment while allocating work directly to salespeople', async t => {
   const { request, records, user } = await api(t); Object.assign(user, { name: 'Quoc Truong', site: 'South Morang Hyundai', role: 'sales_manager', allocation_only: true });
   const paul = { _id: new ObjectId(), name: 'Paul Daoud', role: 'sales_consultant', site: user.site, active: true }; records.users.push(paul);
   const created = await request('/leads', { method: 'POST', body: JSON.stringify({ name: 'Routing fixture', dealership: user.site, owner_name: user.name.toUpperCase() }) });
-  assert.equal(created.status, 201, created.body.error); assert.equal(created.body.data.owner_name, 'Unassigned');
+  assert.equal(created.status, 201, created.body.error); assert.equal(created.body.data.owner_name, user.name.toUpperCase());
   const path = `/leads/${created.body.data.id}`;
-  assert.equal((await request(path, { method: 'PATCH', body: JSON.stringify({ assignedTo: user.name }) })).status, 400);
+  assert.equal((await request(path, { method: 'PATCH', body: JSON.stringify({ assignedTo: user.name }) })).status, 200);
   const assignees = (await request(path + '/assignees')).body.data;
-  assert.ok(assignees.some(person => person.id === String(paul._id))); assert.ok(!assignees.some(person => person.id === String(user._id)));
-  assert.equal((await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(user._id), expectedOwnerId: null }) })).status, 403);
-  const changed = await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(paul._id), expectedOwnerId: null }) });
+  assert.ok(assignees.some(person => person.id === String(paul._id))); assert.ok(assignees.some(person => person.id === String(user._id)));
+  assert.equal((await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(user._id), expectedOwnerId: null }) })).status, 200);
+  const changed = await request(path + '/assignment', { method: 'PATCH', body: JSON.stringify({ assigneeId: String(paul._id), expectedOwnerId: String(user._id) }) });
   assert.equal(changed.status, 200, changed.body.error); assert.equal(changed.body.data.owner_id, String(paul._id));
   const entry = records.leads.find(lead => String(lead._id) === created.body.data.id).diary_entries.at(-1);
   assert.equal(entry.kind, 'assignment'); assert.equal(entry.assignee_id, String(paul._id));
   const day = (await request('/daily-oversight?rooftop=South%20Morang%20Hyundai&queuePage=1')).body.data.workday;
-  assert.ok(!day.members.some(person => person.name === 'Quoc Truong'));
+  assert.ok(day.members.some(person => person.name === 'Quoc Truong'));
   const row = day.members.find(person => person.name === 'Paul Daoud'); assert.equal(row.targets.videosSent, 1); assert.equal(row.signals.videosSent, 'red');
 });
 
@@ -140,12 +251,12 @@ test('allocation-only repair queues only active imported defaults, preserves rea
   assert.equal(concurrent.owner_id, 'paul-fixture');
 });
 
-test('Connex source mapping never imports an allocation-only manager as a sales recipient', async () => {
+test('Connex source mapping permits manager self-assignment despite a legacy flag', async () => {
   const { ingestSnapshot } = require('../lib/connex-store');
   const manager = { _id: new ObjectId(), name: 'Allocator fixture', role: 'sales_manager', site: 'South Morang Hyundai', active: true, allocation_only: true };
   const records = { users: [manager] }, db = fixtureDb(records);
   await ingestSnapshot(db, connexFixture({ salesperson: manager.name }));
-  assert.equal(records.leads[0].owner_id, null); assert.equal(records.leads[0].owner_name, 'Unassigned');
+  assert.equal(records.leads[0].owner_id, String(manager._id)); assert.equal(records.leads[0].owner_name, manager.name);
 });
 test('Connex saved filters and defaults are private to the manager; filters and source export imports remain scoped', async t => {
   const { request, records, user, app } = await api(t); user.site = 'South Morang Hyundai';
@@ -490,7 +601,7 @@ test('inbound New and Used email is authenticated, idempotent, unassigned and qu
   assert.equal(lead.owner_id, null); assert.equal(lead.status, 'new_lead'); assert.equal(lead.inbound_email.category, 'new');
   assert.equal(lead.customer_email, 'customer@example.com');
   const before = records.leads.length;
-  const duplicate = await post('used', { ...input, to: 'SMHYUsed@goodshowroom.com', messageId: '<fixture-2@example.test>' });
+  const duplicate = await post('used', { ...input, text:input.text.replace('Email Customer','Different Customer'), to: 'SMHYUsed@goodshowroom.com', messageId: '<fixture-2@example.test>' });
   assert.equal(duplicate.body.data.status, 'merge_review'); assert.equal(records.leads.length, before);
   const review = (await request('/merge-requests')).body.data[0];
   const resolved = await request(`/merge-requests/${review.id}/resolve`, { method: 'POST', body: JSON.stringify({ primaryId: String(lead._id), expectedUpdatedAt: review.updatedAt }) });
@@ -835,6 +946,7 @@ function fixtureDb(records) {
             else row[field] = value;
           }
           for (const [key, value] of Object.entries(update.$addToSet || {})) row[key] = [...new Set([...(row[key] || []), ...(value.$each || [value])])];
+          for (const [key, value] of Object.entries(update.$push || {})) (row[key] ||= []).push(value);
         }
         return { modifiedCount: matchesQuery.length };
       },
@@ -1026,7 +1138,7 @@ test('daily oversight carries work forward and requires managers to resolve a lo
   assert.equal(myDay.members[0].expected, 1, 'active carry-over prospects remain in the video denominator');
   assert.deepEqual(myDay.unassigned, []);
   const leadPath = `/leads/${id}`;
-  assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() + 3 * 86400000).toISOString() }, { headers })).status, 400);
+  assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() - 3600000).toISOString() }, { headers })).status, 400);
   assert.equal((await post(`${leadPath}/next-action`, { title: 'Call', note: 'Called', dueAt: new Date(Date.now() + 3600000).toISOString() }, { headers })).status, 200);
   assert.equal((await request(dashboard)).body.data.members[0].leads[0].actioned, true);
   assert.equal((await post(`${leadPath}/loss-request`, { reason: ' ' }, { headers })).status, 400);
@@ -1071,7 +1183,7 @@ test('daily oversight credits pasted Booran video links and still-scheduled next
   assert.equal(rows.get(String(linked._id)).actioned, true);
   assert.equal(rows.get(String(linked._id)).videos[0].views, 3);
   assert.equal(rows.get(String(scheduled._id)).actioned, true);
-  assert.equal(rows.get(String(scheduled._id)).overdue, true, 'untouched prospects remain visible separately');
+  assert.equal(rows.get(String(scheduled._id)).overdue, false, 'future follow-ups are not overdue');
   assert.equal(rows.get(String(expired._id)).actioned, false, 'another lead’s link and an expired action do not count');
   assert.equal(person.nextActions, 1);
 });
@@ -1291,15 +1403,15 @@ test('DealerSocket owners populate scoped staff rows and preserve manager alloca
   const byName = new Map(imported.map(lead => [lead.customer_name, lead]));
   assert.equal(byName.get('Imported 0').owner_id, String(staff[0]._id));
   assert.equal(byName.get('Imported 1').owner_id, String(staff[1]._id));
-  assert.equal(byName.get('Imported 2').owner_id, undefined, 'the allocating manager is not an automatic sales recipient');
+  assert.equal(byName.get('Imported 2').owner_id, String(staff[2]._id), 'managers are eligible recipients under the updated scope');
   for (const index of [3, 4, 5, 6]) assert.equal(byName.get(`Imported ${index}`).owner_id, undefined);
   const dashboard = (await request('/daily-oversight?rooftop=South%20Morang%20Hyundai')).body.data;
   assert.equal(dashboard.summary.activeProspects, 6);
   assert.equal(dashboard.dealerSocket.active, 6);
-  assert.equal(dashboard.dealerSocket.assigned, 2);
+  assert.equal(dashboard.dealerSocket.assigned, 3);
   assert.equal(dashboard.dealerSocket.snapshotAt, snapshot.fetchedAt);
-  assert.ok(!dashboard.workday.members.some(person => person.name === 'Quoc Truong'));
-  assert.equal(dashboard.unassigned.length, 4, 'allocating managers, ambiguous, other-site and source bucket owners stay in the allocation queue');
+  assert.ok(dashboard.workday.members.some(person => person.name === 'Quoc Truong'));
+  assert.equal(dashboard.unassigned.length, 3, 'ambiguous, other-site and source bucket owners stay in the allocation queue');
 
   const first = byName.get('Imported 0');
   const second = byName.get('Imported 1');
