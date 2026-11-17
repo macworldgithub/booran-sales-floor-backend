@@ -2272,3 +2272,14 @@ test('holding-cost actions retire when margin recovers and reopen only automatic
   action.status = 'resolved'; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'resolved', 'manual resolutions stay resolved');
   action.status = 'in_progress'; unit.potentialGross = 10000; await refreshInventoryInsights(db, db, now); assert.equal(action.status, 'in_progress', 'work already under way stays with the manager');
 });
+
+test('historical closed enquiries still accrue cost but do not attach an active merged customer to the old vehicle', async () => {
+  const { refreshInventoryInsights } = require('../lib/inventory-insights');
+  const site = 'South Morang Hyundai', old = { _id: new ObjectId(), rooftopName: site, stockNumber: 'OLD', vehicleCost: 10000, daysInStock: 30 }, current = { ...old, _id: new ObjectId(), stockNumber: 'CURRENT' };
+  const customer = { _id: new ObjectId(), dealership_name: site, status: 'following_up', nexgate: { seller_id: 'seller', lead_id: 'now', channel: 'carsales', stock_number: 'CURRENT', stage: 'Contacted' },
+    source_refs: [{ nexgate: { seller_id: 'seller', lead_id: 'old', channel: 'carsales', stock_number: 'OLD', stage: 'Sold' } }] };
+  const records = { vehicles: [old, current], leads: [customer], deals: [{ lead_id: String(customer._id), stock_key: String(old._id), status: 'completed', completed_at: '2026-11-15T00:00:00Z' }] }, db = fixtureDb(records);
+  await refreshInventoryInsights(db, db, new Date('2026-11-17T01:00:00Z'));
+  assert.equal(old.holdingCostBreakdown.carsalesLeads, 1); assert.equal(current.holdingCostBreakdown.carsalesLeads, 1);
+  assert.deepEqual(customer.engagement_assessment.linkedVehicles, [String(current._id)]);
+});
