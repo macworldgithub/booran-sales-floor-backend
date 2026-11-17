@@ -1,6 +1,6 @@
 # SMHY scope implementation — 16 November 2026
 
-Implemented from `SMHY_Comprehensive_Dev_Update_Scope_16Nov2026.md`. This release is code only, prepared on `feat/smhy-16nov-scope`. No deployment, production migration, mailbox access or real Connex opportunity updates were performed. The branch is excluded from Vercel Git deployments; `main` remains unchanged. [Vercel branch deployment controls](https://vercel.com/docs/project-configuration/git-configuration).
+Implemented from `SMHY_Comprehensive_Dev_Update_Scope_16Nov2026.md`. This release is code only, prepared on `feat/smhy-16nov-scope` and promoted to `main`. No deployment, production migration, mailbox access or real Connex opportunity updates were performed. Both branches are excluded from Vercel Git deployments to preserve the request to push code without deploying. Re-enable automatic deployment only when a release is requested. [Vercel branch deployment controls](https://vercel.com/docs/project-configuration/git-configuration).
 
 | Scope | Implementation |
 | --- | --- |
