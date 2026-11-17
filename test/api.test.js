@@ -6,6 +6,81 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('internal drives retain start/finish history, reject conflicting retries and enforce scope', async t => {
+  const { request, records, user } = await api(t), lead = records.leads[0];
+  lead.owner_id = String(user._id);
+  const appraisal = { _id: new ObjectId(), lead_id: String(lead._id), dealership: lead.dealership_name,
+    owner_id: String(user._id), workflow_status: 'ready', revision: 0, offers: [{ amount_cents: 123 }] };
+  records.appraisals = [appraisal];
+  const base = `/leads/${lead._id}/appraisals/${appraisal._id}/drives`;
+  const post = (path, body) => request(path, { method: 'POST', body: JSON.stringify(body) });
+  const body = { requestId: 'drive-fixture-123456789', odometer: 100, notes: 'Before drive' };
+  assert.equal((await post(base, body)).status, 201);
+  assert.equal((await post(base, body)).status, 200);
+  assert.equal(appraisal.internal_drives.length, 1);
+  assert.equal((await post(base, { ...body, odometer: 101 })).status, 409);
+  assert.equal((await post(base, { ...body, requestId: 'another-drive-123456789' })).status, 409);
+  const finish = `${base}/${body.requestId}/finish`;
+  assert.equal((await post(finish, { odometer: 99 })).status, 400);
+  assert.equal((await post(finish, { odometer: 110, notes: 'Returned' })).status, 200);
+  assert.equal((await post(finish, { odometer: 110, notes: 'Returned' })).status, 200);
+  assert.equal((await post(finish, { odometer: 111, notes: 'Returned' })).status, 409);
+  assert.equal(appraisal.internal_drives[0].distance_km, 10);
+  assert.equal(appraisal.internal_drives[0].driver, user.name);
+  assert.ok(appraisal.internal_drives[0].ended_at);
+  user.role = 'sales_consultant';
+  assert.equal((await post(finish, { odometer: 110, notes: 'Returned' })).body.data.offers, undefined);
+  appraisal.dealership = 'Booran Cheltenham';
+  assert.equal((await post(base, body)).status, 404);
+  user.role = 'contractor';
+  assert.equal((await request('/inspection-services')).status, 403);
+});
+
+test('deal appraisal linking is automatic only when unambiguous, preserves financial privacy and locks after contract', async t => {
+  const { request, records, user } = await api(t), lead = records.leads[0];
+  lead.owner_id = String(user._id);
+  const common = { lead_id: String(lead._id), dealership: lead.dealership_name, owner_id: String(user._id), workflow_status: 'ready', ppsr: { status: 'clear' } };
+  records.appraisals = [{ ...common, _id: new ObjectId() }];
+  const create = body => request(`/leads/${lead._id}/deals`, { method: 'POST', body: JSON.stringify({ vin: 'KM8J33A41GU123456', ...body }) });
+  let result = await create({}); assert.equal(result.status, 201, result.body.error);
+  assert.equal(result.body.data.appraisal_id, String(records.appraisals[0]._id));
+  assert.equal(result.body.data.appraisal_ppsr.status, 'clear');
+  records.appraisals.push({ ...common, _id: new ObjectId() });
+  assert.equal((await create({})).status, 409);
+  assert.equal((await create({ withoutAppraisal: true })).body.data.appraisal_id, null);
+  const deal = records.deals[0]; deal.cost_cents = 100; deal.gross_cents = 10;
+  const change = body => request(`/leads/${lead._id}/deals/${deal._id}/appraisal`, { method: 'PATCH', body: JSON.stringify(body) });
+  user.role = 'sales_consultant'; user.viewCost = false;
+  result = await change({ appraisalId: String(records.appraisals[1]._id), revision: 0 });
+  assert.equal(result.status, 200, result.body.error); assert.equal(result.body.data.cost_cents, undefined);
+  assert.equal((await change({ appraisalId: String(records.appraisals[0]._id), revision: 0 })).status, 409);
+  deal.contract = { reference: 'Already signed' };
+  assert.equal((await change({ appraisalId: String(records.appraisals[0]._id), revision: 1 })).status, 409);
+});
+
+test('signed contracts require manager and same-customer private attachment, retain appraisal and reject replacement', async t => {
+  const { request, records, user } = await api(t), lead = records.leads[0];
+  lead.owner_id = String(user._id);
+  const deal = { _id: new ObjectId(), lead_id: String(lead._id), dealership: lead.dealership_name, owner_id: String(user._id), status: 'registered', appraisal_id: new ObjectId() };
+  records.deals = [deal];
+  const file = { _id: new ObjectId(), lead_id: String(lead._id), dealership_name: lead.dealership_name, status: 'ready', visibility: 'private', purpose: 'contract', content_type: 'application/pdf', name: 'signed.pdf' };
+  records.message_media = [file];
+  const path = `/leads/${lead._id}/deals/${deal._id}/contract`;
+  const body = { requestId: 'contract-fixture-123456789', signedAt: '2026-01-01T00:00:00Z', reference: 'SIGNED-1', mediaId: String(file._id) };
+  const post = body => request(path, { method: 'POST', body: JSON.stringify(body) });
+  user.role = 'sales_consultant'; assert.equal((await post(body)).status, 403);
+  user.role = 'manager'; file.visibility = 'public'; assert.equal((await post(body)).status, 404);
+  file.visibility = 'private';
+  let result = await post(body); assert.equal(result.status, 201, result.body.error);
+  assert.equal(result.body.data.contract.appraisal_id, String(deal.appraisal_id));
+  assert.equal((await post(body)).status, 200);
+  assert.equal((await post({ ...body, reference: 'Replacement' })).status, 409);
+  assert.equal(deal.contract.reference, 'SIGNED-1');
+  const { validateMedia } = require('../lib/media-storage');
+  assert.throws(() => validateMedia({ name: 'public.pdf', content_type: 'application/pdf', size: 10 }));
+  assert.equal(validateMedia({ name: 'signed.pdf', content_type: 'application/pdf', size: 10, visibility: 'private', purpose: 'contract' }).content_type, 'application/pdf');
+});
+
 test('appraisal centre enforces dealership and consultant boundaries, preserves offers on update and rejects stale decisions', async t => {
   const { request, records, user } = await api(t);
   const lead = records.leads[0], id = new ObjectId();
