@@ -890,8 +890,8 @@ if (!process.env.VERCEL) {
         }).catch(() => console.warn('Nextgate sync unavailable.'));
         reconcile();
         interval(reconcile, HOUR);
-        const fastInterval = Number(process.env.NEXGATE_LIVE_POLL_MS);
-        if (Number.isInteger(fastInterval) && fastInterval >= 15000 && fastInterval < HOUR) {
+        const fastInterval = Number(process.env.NEXGATE_LIVE_POLL_MS) || 20000;
+        if (Number.isInteger(fastInterval) && fastInterval >= 10000 && fastInterval < HOUR) {
           const poll = () => app.locals.nextgate.pollLatest().catch(() => console.warn('Nextgate live poll unavailable.'));
           interval(poll, fastInterval);
         }
@@ -925,10 +925,10 @@ if (!process.env.VERCEL) {
       const checkLeadEmail = () => database('MONGODB_URI_FLWUP').then(db => pollLeadEmail(db)).catch(() => console.warn('Inbound lead email is temporarily unavailable.'));
       if (app.locals.connex.configured) {
         const checkConnex = () => app.locals.connex.run().catch(() => console.warn('Connex worker is temporarily unavailable.'));
-        void checkConnex(); interval(checkConnex, 30000);
+        void checkConnex(); interval(checkConnex, 15000);
         interval(() => database('MONGODB_URI_FLWUP').then(db => processConnexNotifications(db)).catch(() => console.warn('Connex notification check unavailable.')), 60000);
       }
-      if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 60000); }
+      if (mailboxes().some(inbox => inbox.pass)) { void checkLeadEmail(); interval(checkLeadEmail, 20000); }
       const checkAlerts = () => database('MONGODB_URI_FLWUP').then(checkAgedLeads).catch(() => console.warn('Aged lead alert sweep failed.'));
       interval(checkAlerts, HOUR);
 

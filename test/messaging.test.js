@@ -48,6 +48,8 @@ test('local files are private until complete and survive creating a new storage 
   assert.deepEqual(await fs.readFile(filename), Buffer.from([0, 255, 1, 128, 2, 3]));
   await restarted.complete(media);
   await assert.rejects(fs.stat(path.join(directory, media.staging_key)), { code: 'ENOENT' });
+  await storage.delete(media);
+  await assert.rejects(fs.stat(filename), { code: 'ENOENT' });
 });
 
 test('local chunks are ordered, bounded, retryable and reject changes to saved bytes', async (t) => {

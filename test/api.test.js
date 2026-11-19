@@ -2299,3 +2299,83 @@ test('fleet reconciliation reads histories only for active matched prospects, no
   assert.equal(result.paidLeads, 141); assert.equal(result.matchedPaid, 1); assert.equal(result.assessed, 1);
   assert.deepEqual(historyIds, [String(active._id)]); assert.deepEqual(messageIds, [String(active._id)]);
 });
+
+test('unsent videos can be deleted and sent videos reject deletion with 400', async (t) => {
+  const { request, records, user } = await api(t);
+  const lead = records.leads[0];
+  const unsentMediaId = new ObjectId();
+  const sentMediaId = new ObjectId();
+  records.message_media = [
+    { _id: unsentMediaId, lead_id: String(lead._id), dealership_name: lead.dealership_name, name: 'unsent.mp4', content_type: 'video/mp4', size: 100, status: 'ready', visibility: 'public', share_token: '1'.repeat(64) },
+    { _id: sentMediaId, lead_id: String(lead._id), dealership_name: lead.dealership_name, name: 'sent.mp4', content_type: 'video/mp4', size: 100, status: 'ready', visibility: 'public', share_token: '2'.repeat(64) },
+  ];
+  records.customer_messages = [
+    { _id: 'msg-1', lead_id: String(lead._id), dealership_name: lead.dealership_name, status: 'sent', attachments: [{ id: String(sentMediaId), content_type: 'video/mp4' }] },
+  ];
+
+  // Media list returns sent boolean
+  const listRes = await request(`/leads/${lead._id}/media`);
+  assert.equal(listRes.status, 200);
+  const unsentItem = listRes.body.data.find(m => m.id === String(unsentMediaId));
+  const sentItem = listRes.body.data.find(m => m.id === String(sentMediaId));
+  assert.equal(unsentItem.sent, false);
+  assert.equal(sentItem.sent, true);
+
+  // Deleting sent video fails with 400
+  const deleteSentRes = await request(`/leads/${lead._id}/media/${sentMediaId}`, { method: 'DELETE' });
+  assert.equal(deleteSentRes.status, 400);
+
+  // Deleting unsent video succeeds with 200
+  const deleteUnsentRes = await request(`/leads/${lead._id}/media/${unsentMediaId}`, { method: 'DELETE' });
+  assert.equal(deleteUnsentRes.status, 200, deleteUnsentRes.body?.error);
+  assert.equal(records.message_media.find(m => String(m._id) === String(unsentMediaId)), undefined);
+});
+
+test('posting a note with completeAction: true completes open next_action and open sales_tasks', async (t) => {
+  const { request, records, user } = await api(t);
+  const lead = records.leads[0];
+  lead.next_action = { title: 'Call client', due_at: '2026-11-20T10:00:00Z', status: 'open' };
+  const task = { _id: new ObjectId(), lead_id: String(lead._id), dealership: lead.dealership_name, title: 'Call client', status: 'open' };
+  records.sales_tasks = [task];
+
+  const post = (body) => request(`/leads/${lead._id}/notes`, { method: 'POST', body: JSON.stringify(body) });
+
+  // Normal note without completeAction leaves action open
+  let res = await post({ note: 'First regular note', requestId: '00000000-0000-0000-0000-000000000001' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.next_action?.status, 'open');
+  assert.equal(records.sales_tasks[0].status, 'open');
+
+  // Note with completeAction: true completes both next_action and sales_tasks
+  res = await post({ note: 'Spoke with client, action complete', completeAction: true, requestId: '00000000-0000-0000-0000-000000000002' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.next_action?.status, 'completed');
+  assert.equal(records.sales_tasks[0].status, 'completed');
+  assert.ok(records.sales_tasks[0].completed_at);
+});
+
+test('approved loss clears next_action, follow-up fields, completes tasks and cancels appointments', async (t) => {
+  const { request, records } = await api(t);
+  const lead = records.leads[0];
+  lead.status = 'following_up';
+  lead.next_action = { title: 'Follow up', due_at: '2026-11-25T10:00:00Z', status: 'open' };
+  lead.first_followup_due_at = '2026-11-20T10:00:00Z';
+  lead.followup_days = [1, 3, 5];
+  lead.loss_review = { id: 'loss-fixture-1', reason: 'Customer bought elsewhere', status: 'pending' };
+  const task = { _id: new ObjectId(), lead_id: String(lead._id), dealership: lead.dealership_name, status: 'open' };
+  const appt = { _id: new ObjectId(), leadId: String(lead._id), dealership: lead.dealership_name, status: 'Confirmed' };
+  records.sales_tasks = [task];
+  records.appointments = [appt];
+
+  const res = await request(`/leads/${lead._id}/loss-review`, {
+    method: 'POST',
+    body: JSON.stringify({ reviewId: 'loss-fixture-1', action: 'approve' }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.status, 'lost');
+  assert.equal(res.body.data.next_action, null);
+  assert.equal(res.body.data.first_followup_due_at, null);
+  assert.deepEqual(res.body.data.followup_days, []);
+  assert.equal(records.sales_tasks[0].status, 'completed');
+  assert.equal(records.appointments[0].status, 'Cancelled');
+});

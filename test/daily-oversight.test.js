@@ -18,13 +18,16 @@ test('active prospects stay visible and every partial completion indicator is re
     { _id: 'ready-video', lead_id: 'first', content_type: 'video/mp4', status: 'ready', created_at: earlier },
     { _id: 'unfinished-video', lead_id: 'second', content_type: 'video/mp4', status: 'processing', created_at: earlier },
   ];
-  const input = { leads, tasks, media, staff: [{ _id: 'staff', name: 'Salesperson' }], deals: [], messages: [] };
+  const messages = [
+    { lead_id: 'first', status: 'delivered', direction: 'outbound', created_at: now.toISOString(), attachments: [{ id: 'ready-video', content_type: 'video/mp4' }] },
+  ];
+  const input = { leads, tasks, media, staff: [{ _id: 'staff', name: 'Salesperson' }], deals: [], messages };
   const overview = buildDailyOversight(input, now);
   const [person] = overview.members;
   assert.equal(person.activeProspects, 2, 'an active legacy prospect without a creation date is visible');
   assert.equal(person.logged, 1);
   assert.equal(person.expected, 2);
-  assert.equal(person.videosDone, 1, 'a previously completed video counts and an unfinished render does not');
+  assert.equal(person.videosDone, 1, 'an actually sent video counts towards video sent completion');
   assert.equal(person.nextActions, 1);
   assert.equal(overview.summary.activityRemaining, 1);
   assert.equal(overview.summary.nextActionsRemaining, 1);
@@ -34,6 +37,12 @@ test('active prospects stay visible and every partial completion indicator is re
   leads[1].last_activity_at = now.toISOString();
   leads[1].next_action = leads[0].next_action;
   media[1].status = 'ready';
+  // Merely adding/recording a video does NOT turn the video light green
+  const [stillRed] = buildDailyOversight(input, now).members;
+  assert.equal(stillRed.signals.videos, 'red', 'only sent videos satisfy the video light, not merely added/recorded');
+
+  // Once the video message is actually sent, the light turns green
+  messages.push({ lead_id: 'second', status: 'delivered', direction: 'outbound', created_at: now.toISOString(), attachments: [{ id: 'unfinished-video', content_type: 'video/mp4' }] });
   tasks[1].status = 'completed';
   tasks[1].completed_at = now.toISOString();
   const [finished] = buildDailyOversight(input, now).members;
