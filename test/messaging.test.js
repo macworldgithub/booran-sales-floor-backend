@@ -113,9 +113,16 @@ test('SMS length accounts for GSM escapes and UTF-16 emoji parts', () => {
   assert.throws(() => validateSmsLength('界'.repeat(671)), { status: 400 });
 });
 
-test('uploads reject unsupported files, malformed sizes and over-limit videos', () => {
-  assert.equal(validateMedia({ name: 'seal.mp4', content_type: 'video/mp4', size: 100 * 1024 * 1024 }).size, 104857600);
-  for (const fields of [{ content_type: 'text/html' }, { content_type: 'image/svg+xml' }, { size: 0 }, { size: '100' }, { size: 104857601 }, { name: '' }]) {
+test('uploads reject unsupported files, malformed sizes and over-limit videos, and support iPhone/Android formats up to 500 MB', () => {
+  assert.equal(validateMedia({ name: 'seal.mp4', content_type: 'video/mp4', size: 500 * 1024 * 1024 }).size, 524288000);
+  // iPhone and Android photo and video formats
+  assert.equal(validateMedia({ name: 'photo.heic', content_type: '', size: 5 * 1024 * 1024 }).content_type, 'image/heic');
+  assert.equal(validateMedia({ name: 'video.mov', content_type: 'video/quicktime', size: 250 * 1024 * 1024 }).content_type, 'video/quicktime');
+  assert.equal(validateMedia({ name: 'android.3gp', content_type: 'video/3gpp', size: 50 * 1024 * 1024 }).content_type, 'video/3gpp');
+  assert.equal(validateMedia({ name: 'clip.m4v', content_type: '', size: 10 * 1024 * 1024 }).content_type, 'video/x-m4v');
+  assert.equal(validateMedia({ name: 'raw.dng', content_type: 'image/x-adobe-dng', size: 30 * 1024 * 1024 }).content_type, 'image/x-adobe-dng');
+
+  for (const fields of [{ content_type: 'text/html' }, { content_type: 'image/svg+xml' }, { size: 0 }, { size: '100' }, { size: 524288001 }, { name: '' }]) {
     assert.throws(() => validateMedia({ name: 'test.jpg', content_type: 'image/jpeg', size: 100, ...fields }), { status: 400 });
   }
 });
