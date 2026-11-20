@@ -23,6 +23,7 @@ const { installExternalWebhook, installExternalLeads } = require('./lib/external
 const { installLeadProcess } = require('./lib/lead-process');
 const { installDailyOversight } = require('./lib/daily-oversight');
 const { installPulse, calendarDay } = require('./lib/pulse');
+const { installCrmReport } = require('./lib/crm-report');
 const { installSalesWorkflows } = require('./lib/sales-workflows');
 const { installAppraisalCentre } = require('./lib/appraisal-centre');
 const { createTradeInService, installTradeInManagement, installPublicTradeIn } = require('./lib/trade-in-opportunities');
@@ -68,6 +69,10 @@ async function database(envKey, lane = 'application') {
 
 function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
 const app = express();
+app.use((req,res,next)=>{
+  res.on('finish',()=>{if(res.statusCode<300 && !['GET','HEAD','OPTIONS'].includes(req.method))require('./lib/crm-report').caches.clear();});
+  next();
+});
 const inventoryInsights = createInventoryInsightsService(resolveDatabase);
 app.locals.inventoryInsights = inventoryInsights;
 if (require.main === module && !process.env.VERCEL) app.use((req, res, next) => {
@@ -183,6 +188,7 @@ installConnex(router, getFlwupDb, app.locals.connex);
 installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
+installCrmReport(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb);
 require('./lib/crm-updates').installCrmUpdates(router, getFlwupDb);
 require('./lib/video-library').installVideoLibrary(router, getFlwupDb);
@@ -331,6 +337,7 @@ router.patch('/leads/:id', async (req, res) => {
     if (req.body.status && req.body.status !== existingLead.status) {
       query = { ...query, status: existingLead.status, 'loss_review.status': { $ne: 'pending' } };
       updateDoc.$inc = { process_revision: 1 };
+      updateDoc.$push.stage_history={from:existingLead.status,to:req.body.status,at:updateDoc.$set.last_activity_at,by:req.user.id};
     }
     if (Object.hasOwn(updateDoc.$set, 'business_name')) {
       const lead = await db.collection('leads').findOne(query);

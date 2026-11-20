@@ -148,6 +148,56 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
 
+test('CRM report and drill-downs share dealership/owner filters and store aggregate trends without customer details',async t=>{
+ const {request,records,user}=await api(t),created=new Date(Date.now()-3600000).toISOString();
+ for(const lead of records.leads){lead.created_at=created;lead.status='new_lead';lead.customer_phone='+61400000000';}
+ records.leads[0].owner_id=String(user._id);records.leads[1].owner_id='other';
+ let response=await request('/crm/report');assert.equal(response.status,200,response.body.error);assert.equal(response.body.data.metrics.leads,2);
+ assert.equal((await request('/crm/report/leads?filter=leads')).body.pagination.total,2);
+ assert.equal(records.crm_report_snapshots.length,1);assert.equal(records.crm_report_snapshots[0].customer_name,undefined);
+ response=await request('/crm/report?rooftop=BYD%20South%20Morang');assert.equal(response.body.data.metrics.leads,1);
+ assert.equal((await request('/crm/report?from=2026-01-01&to=2026-11-20')).status,400);
+ user.role='sales_consultant';assert.equal((await request('/crm/report')).body.data.metrics.leads,1);
+ assert.equal((await request('/crm/report/leads?filter=active')).body.pagination.total,1);
+ assert.equal((await request('/crm/report?staff='+user._id)).status,403);
+ user.role='contractor';assert.equal((await request('/crm/report')).status,403);assert.equal((await request('/crm/report/leads')).status,403);
+});
+test('CRM actions are audited, scoped, idempotent and preserve contact evidence and loss/sale workflows',async t=>{
+ const {request,records,user}=await api(t),lead=records.leads[0];lead.created_at=new Date(Date.now()-3600000).toISOString();lead.owner_id=String(user._id);
+ const path='/crm/leads/'+lead._id,post=(suffix,body)=>request(path+suffix,{method:'POST',body:JSON.stringify(body)});
+ const body={revision:null,requestId:'12345678-1234-1234-1234-123456789abc',channel:'call',outcome:'no_answer',notes:'No answer.'};
+ assert.equal((await post('/contact',body)).status,200);assert.equal((await post('/contact',body)).status,200);assert.equal(lead.crm_contacts.length,1);
+ assert.equal((await post('/contact',{...body,notes:'Different'})).status,409);
+ let report=(await request('/crm/report')).body.data;assert.equal(report.metrics.contacted,0);assert.equal(report.metrics.firstResponse.samples,1);
+ const connected={...body,revision:1,requestId:'22345678-1234-1234-1234-123456789abc',outcome:'connected',notes:'Customer answered.'};
+ assert.equal((await post('/contact',connected)).status,200);report=(await request('/crm/report')).body.data;assert.equal(report.metrics.contacted,1);
+ const row=(await request('/crm/report/leads?filter=active')).body.data.find(row=>row.lead._id===String(lead._id));
+ const handled={revision:row.revision,key:row.key,requestId:'32345678-1234-1234-1234-123456789abc',notes:'Resolved the customer question.'};
+ assert.equal((await post('/handled',handled)).status,200);
+ assert.equal((await request('/crm/report/leads')).body.data.some(row=>row.lead._id===String(lead._id)),false);
+ assert.equal((await request('/crm/report/leads?handled=true')).body.data.some(row=>row.lead._id===String(lead._id)),true);
+ assert.equal((await post('/stage',{revision:lead.process_revision,requestId:'42345678-1234-1234-1234-123456789abc',status:'sold',notes:'Sale'})).status,400);
+ user.role='sales_consultant';assert.equal((await post('/step-in',{...handled,revision:lead.process_revision})).status,403);
+ assert.equal((await request('/crm/leads/'+records.leads[2]._id+'/contact',{method:'POST',body:JSON.stringify(body)})).status,404);
+ user.role='manager';
+ assert.equal((await post('/step-in',{revision:lead.process_revision,requestId:'52345678-1234-1234-1234-123456789abc',notes:'Manager reviewing the concern.'})).status,200);
+ assert.equal(lead.owner_id,String(user._id));assert.equal(records.sales_alerts[0].kind,'manager_intervention');
+});
+test('CRM appointment outcomes reject future attendance and foreign sales, then link the right attended appointment',async t=>{
+ const {request,records,user}=await api(t),lead=records.leads[0],id=new ObjectId();lead.owner_id=String(user._id);
+ records.appointments=[{_id:id,leadId:String(lead._id),dealership:lead.dealership_name,consultant_id:String(user._id),status:'Booked',type:'Test Drive',createdAt:new Date(Date.now()-3600000).toISOString(),when:new Date(Date.now()+3600000).toISOString()}];
+ const change=status=>request('/crm/appointments/'+id,{method:'PATCH',body:JSON.stringify({status})});
+ assert.equal((await change('Completed')).status,409);assert.equal((await change('Confirmed')).status,200);
+ records.appointments[0].when=new Date(Date.now()-60000).toISOString();
+ assert.equal((await change('Completed')).status,200);assert.ok(records.appointments[0].shown_at);
+ assert.equal((await change('Completed')).status,200);assert.equal((await change('Cancelled')).status,409);
+ const deal={_id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,status:'completed',createdAt:new Date().toISOString(),completed_at:new Date(Date.now()+100).toISOString()};
+ records.deals=[deal];
+ const link=()=>request('/crm/deals/'+deal._id+'/appointment',{method:'POST',body:JSON.stringify({appointmentId:String(id)})});
+ user.role='sales_consultant';assert.equal((await link()).status,403);
+ user.role='manager';assert.equal((await link()).status,200);assert.equal(deal.appointment_id,String(id));
+ deal.lead_id=String(records.leads[1]._id);assert.equal((await link()).status,409);
+});
 function tradeEnvironment(t, extra = {}) {
   const values = { TRADE_IN_TOKEN_SECRET: 'test-only-signing-secret-123456789012345', TRADE_IN_PUBLIC_URL: 'https://example.test', TRADE_IN_SEND_ENABLED: 'true', ...extra };
   const before = Object.fromEntries(Object.keys(values).map(key => [key,process.env[key]]));
