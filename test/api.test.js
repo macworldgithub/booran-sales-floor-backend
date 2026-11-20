@@ -148,6 +148,203 @@ const read = (record, field) => field.split('.').reduce((value, key) => Array.is
 const connexFixture = (extra = {}) => ({ recordId: '006TJ000013YBI9YAO', dealership: 'South Morang Hyundai', dealerCode: 'H3752V',
   opportunityName: 'RYI-fixture', name: 'Connex Fixture Customer', stage: 'Distributed', createdAt: '2026-11-10T09:00:00Z', ...extra });
 
+function tradeEnvironment(t, extra = {}) {
+  const values = { TRADE_IN_TOKEN_SECRET: 'test-only-signing-secret-123456789012345', TRADE_IN_PUBLIC_URL: 'https://example.test', TRADE_IN_SEND_ENABLED: 'true', ...extra };
+  const before = Object.fromEntries(Object.keys(values).map(key => [key,process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key,value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+}
+function tradeSource(records, lead) {
+  const now = new Date().toISOString(), since = new Date(Date.now()-3600000).toISOString();
+  records.integration_sync = [{ _id:'trade-in:settings:'+lead.dealership_name.toLowerCase(), kind:'trade_in_settings', dealership:lead.dealership_name, enabled_at:since,
+    settings:{enabled:true,postSale:true,lostLead:true,service:true,channels:['sms']} }];
+  const deal = { _id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,status:'completed',trade_in_status:'none',completed_at:now };
+  records.deals = [deal];
+  lead.customer_phone = '+61400000001';
+  return deal;
+}
+test('trade invitations send once across workers, exclude trades and respect the shared contact cap', async t => {
+  tradeEnvironment(t);
+  let sends=0;
+  const { app,records,user,request } = await api(t,{sms:{configured:()=>true,sendSms:async () => { sends++; return {status:'queued',provider_message_id:'fixture'}; }}});
+  const lead=records.leads[0]; lead.owner_id=String(user._id);
+  const deal=tradeSource(records,lead);
+  records.deals.push({...deal,_id:new ObjectId(),appraisal_id:new ObjectId()});
+  await Promise.all([app.locals.tradeIns.sweep(),app.locals.tradeIns.sweep()]);
+  await app.locals.tradeIns.sweep();
+  assert.equal(sends,1); assert.equal(records.trade_in_opportunities.length,1);
+  assert.equal(records.trade_in_opportunities[0].channels.sms,'sent');
+  records.deals.push({...deal,_id:new ObjectId(),trade_in_checked:false});
+  await app.locals.tradeIns.sweep();
+  assert.equal(sends,1); assert.equal(records.trade_in_opportunities[1].channels.sms,'suppressed');
+  user.role='sales_consultant';
+  assert.equal((await request('/trade-in/opportunities')).body.data.length,2);
+  assert.equal((await request('/trade-in/settings?rooftop='+encodeURIComponent(lead.dealership_name))).status,403);
+  lead.owner_id='another'; records.trade_in_opportunities.forEach(row => row.owner_id='another');
+  assert.equal((await request('/trade-in/opportunities')).body.data.length,0);
+});
+test('trade provider ambiguity, global pause and opt-out never automatically replay an SMS', async t => {
+  tradeEnvironment(t,{TRADE_IN_SEND_ENABLED:'false'});
+  let sends=0;
+  const {app,records}=await api(t,{sms:{configured:()=>true,sendSms:async () => { sends++; throw new Error('Provider response interrupted'); }}});
+  const lead=records.leads[0]; tradeSource(records,lead);
+  await app.locals.tradeIns.sweep(); assert.equal(sends,0);
+  process.env.TRADE_IN_SEND_ENABLED='true';
+  await app.locals.tradeIns.sweep(); await app.locals.tradeIns.sweep();
+  assert.equal(sends,1); assert.equal(records.trade_in_opportunities[0].channels.sms,'unknown');
+  assert.equal(records.customer_messages[0].status,'unknown');
+  lead.booran_opted_out=true;
+  records.deals.push({...records.deals[0],_id:new ObjectId(),trade_in_checked:false});
+  await app.locals.tradeIns.sweep();
+  assert.equal(records.trade_in_opportunities.length,1);
+});
+test('trade lost triggers send both channels once across independent workers and co-located state', async t => {
+  tradeEnvironment(t);
+  const {records,user}=await api(t);
+  const lead=records.leads[0]; tradeSource(records,lead); records.deals=[];
+  lead.owner_id=String(user._id); lead.customer_email='fixture@example.test'; lead.status='lost';
+  lead.loss_review={id:'loss-review-one',reviewed_at:new Date().toISOString(),status:'approved'};
+  records.integration_sync[0].settings.channels=['sms','email'];
+  const {withLeadState}=require('../lib/lead-state'), {createTradeInService}=require('../lib/trade-in-opportunities');
+  const raw=fixtureDb(records);
+  const db=withLeadState({...raw,collection:name=>({...raw.collection(name),createIndexes:async()=>[]})},'shared_state');
+  // Move the dealership configuration into the same physical collection.
+  const config=records.integration_sync[0];
+  records.shared_state=[{...config,_id:'gs:integration_sync:'+config._id,gs_state_kind:'integration_sync'}];
+  let sms=0,email=0;
+  const options={sms:{configured:()=>true,sendSms:async()=>{sms++;return {status:'queued'};}},email:async()=>{email++;}};
+  const first=createTradeInService(async()=>db,options),second=createTradeInService(async()=>db,options);
+  await Promise.all([first.sweep(),second.sweep()]); await second.sweep();
+  assert.equal(sms,1); assert.equal(email,1);
+  const rows=await db.collection('trade_in_opportunities').find({}).toArray();
+  assert.equal(rows.length,1); assert.match(rows[0]._id,/^[a-f0-9]{64}$/);
+  assert.equal(rows[0].channels.sms,'sent'); assert.equal(rows[0].channels.email,'sent');
+});
+test('trade service feed authenticates, scopes and updates the same booking on cancellation', async t => {
+  tradeEnvironment(t,{TRADE_IN_SERVICE_WEBHOOK_SECRET:'test-only-service-secret-123456789012345',TRADE_IN_SERVICE_SITES:'BYD South Morang'});
+  const {request,records}=await api(t),lead=records.leads[0];
+  const path='/webhooks/trade-in/service-bookings';
+  const body={reference:'FEED-123',dealership:lead.dealership_name,leadId:String(lead._id),startsAt:'2026-12-01T09:00:00+11:00'};
+  const post=(body,secret=process.env.TRADE_IN_SERVICE_WEBHOOK_SECRET)=>request(path,{method:'POST',headers:{cookie:'',authorization:'Bearer '+secret},body:JSON.stringify(body)});
+  assert.equal((await post(body,'wrong')).status,403);
+  assert.equal((await post({...body,dealership:'Booran Cheltenham'})).status,403);
+  assert.equal((await post(body)).status,201);
+  assert.equal((await post({...body,leadId:undefined,status:'cancelled'})).status,201);
+  assert.equal(records.service_bookings.length,1); assert.equal(records.service_bookings[0].status,'cancelled');
+});
+test('trade customer links protect private photos and submit once into the valuation queue', async t => {
+  tradeEnvironment(t,{TRADE_IN_SEND_ENABLED:'false'});
+  const {app,records,request}=await api(t);
+  const lead=records.leads[0]; tradeSource(records,lead); await app.locals.tradeIns.sweep();
+  const {tokenFor}=require('../lib/trade-in-opportunities');
+  const opportunity=records.trade_in_opportunities[0],token=tokenFor(opportunity),path='/public/trade-ins/'+token;
+  const anonymous={headers:{cookie:''}};
+  const get=await request(path,anonymous); assert.equal(get.status,200); assert.equal(get.body.data.phone,undefined);
+  assert.equal((await request('/public/trade-ins/'+token.slice(0,-1)+'!',anonymous)).status,404);
+  const expired=tokenFor({...opportunity,expires_at:new Date(Date.now()-1000).toISOString()});
+  assert.equal((await request('/public/trade-ins/'+expired,anonymous)).status,410);
+  const photo={_id:new ObjectId(),trade_in_opportunity_id:opportunity._id,lead_id:String(lead._id),dealership_name:lead.dealership_name,status:'ready',visibility:'private',name:'vehicle.jpg',section:'front'};
+  records.message_media=[photo];
+  const body={vehicleType:'boat',make:'Example',model:'Cruiser',photoIds:[String(photo._id)]};
+  const submit=body=>request(path+'/submit',{...anonymous,method:'POST',body:JSON.stringify(body)});
+  assert.equal((await submit({...body,photoIds:[String(new ObjectId())]})).status,400);
+  const first=await submit(body); assert.equal(first.status,200,first.body.error);
+  assert.equal((await submit(body)).body.data.appraisalId,first.body.data.appraisalId);
+  assert.equal(records.appraisals.length,1); assert.equal(records.appraisals[0].workflow_status,'ready');
+  assert.equal(records.appraisals[0].lead_id,String(lead._id));
+  assert.equal((await submit({...body,model:'Different'})).status,409);
+  assert.equal((await request(path+'/opt-out',{...anonymous,method:'POST',body:'{}'})).status,200);
+  assert.equal(lead.booran_opted_out,true);
+});
+test('trade public photo upload retains bytes, rejects another invitation and releases incomplete slots once', async t => {
+  tradeEnvironment(t,{TRADE_IN_SEND_ENABLED:'false'});
+  const files=new Map();
+  const storage={
+    validateMedia:require('../lib/media-storage').validateMedia,
+    prepare:async media=>{files.set(String(media._id),Buffer.alloc(0));return {chunk_size:2097152};},
+    uploadChunk:async (media,offset,body)=>{const previous=files.get(String(media._id));assert.equal(offset,previous.length);const joined=Buffer.concat([previous,body]);files.set(String(media._id),joined);return joined.length;},
+    complete:async media=>assert.equal(files.get(String(media._id)).length,media.size),
+    remove:async media=>files.delete(String(media._id)),
+  };
+  const {app,records,request}=await api(t,{storage}),lead=records.leads[0];
+  tradeSource(records,lead);await app.locals.tradeIns.sweep();
+  const {tokenFor}=require('../lib/trade-in-opportunities'),op=records.trade_in_opportunities[0];
+  const base='/public/trade-ins/'+tokenFor(op),anonymous={headers:{cookie:''}};
+  const post=(path,body)=>request(path,{...anonymous,method:'POST',body:JSON.stringify(body)});
+  assert.equal((await post(base+'/photos',{name:'clip.mp4',size:4,content_type:'video/mp4',section:'front'})).status,400);
+  let response=await post(base+'/photos',{name:'car.jpg',size:4,content_type:'image/jpeg',section:'front'});
+  assert.equal(response.status,201,response.body.error);
+  const mediaId=response.body.data.id;
+  const other={...op,_id:'f'.repeat(64)};records.trade_in_opportunities.push(other);
+  const foreign='/public/trade-ins/'+tokenFor(other)+'/photos/'+mediaId+'/complete';
+  assert.equal((await post(foreign,{})).status,404);
+  const bytes=Buffer.from([255,216,255,217]);
+  response=await request(base+'/photos/'+mediaId+'/content?offset=0',{method:'PUT',headers:{cookie:'','content-type':'application/octet-stream'},body:bytes});
+  assert.equal(response.status,200,response.body.error);
+  assert.equal((await post(base+'/photos/'+mediaId+'/complete',{})).status,200);
+  assert.deepEqual(files.get(mediaId),bytes);assert.equal(records.message_media[0].visibility,'private');
+  response=await post(base+'/photos',{name:'incomplete.jpg',size:4,content_type:'image/jpeg',section:'rear'});
+  const incomplete=response.body.data.id,remove=()=>request(base+'/photos/'+incomplete,{...anonymous,method:'DELETE'});
+  assert.equal((await remove()).status,200);assert.equal((await remove()).status,200);
+  assert.equal(op.photo_count,1);
+  assert.equal((await request(base,anonymous)).body.data.photos.length,1);
+});
+test('service bookings notify only three Melbourne calendar days out, remain idempotent and enforce site boundaries', async t => {
+  tradeEnvironment(t,{TRADE_IN_SEND_ENABLED:'false'});
+  const {app,records,request,user}=await api(t);
+  const lead=records.leads[0]; tradeSource(records,lead); records.deals=[];
+  const {dayKey}=require('../lib/trade-in-opportunities');
+  const startsAt=dayKey(new Date(),3)+'T10:00:00+11:00';
+  const body={reference:'SERVICE-ONE',dealership:lead.dealership_name,leadId:String(lead._id),startsAt,vehicle:'Tucson'};
+  const post=body=>request('/trade-in/service-bookings',{method:'POST',body:JSON.stringify(body)});
+  assert.equal((await post(body)).status,201); assert.equal((await post(body)).status,201);
+  assert.equal(records.service_bookings.length,1);
+  const booking=records.service_bookings[0];
+  records.service_bookings.push({...booking,_id:'stale',observed_at:new Date(Date.now()-8*86400000).toISOString()},
+    {...booking,_id:'tomorrow',starts_at:dayKey(new Date(),1)+'T10:00:00+11:00'},
+    {...booking,_id:'cancelled',status:'cancelled'});
+  await app.locals.tradeIns.sweep(); await app.locals.tradeIns.sweep();
+  assert.equal(records.trade_in_opportunities.length,1); assert.equal(records.sales_alerts.length,1);
+  const alert=(await request('/trade-in/alerts')).body.data.items[0];
+  assert.match(alert.title,/3 days/);
+  assert.equal((await request('/trade-in/alerts/'+alert._id+'/read',{method:'PATCH',body:'{}'})).status,200);
+  assert.equal((await request('/trade-in/alerts')).body.data.total,0);
+  assert.equal((await post({...body,leadId:String(records.leads[1]._id)})).status,409);
+  assert.equal((await post({...body,dealership:'Booran Cheltenham'})).status,403);
+  assert.equal((await post({...body,status:'cancelled',leadId:undefined})).status,201);
+  await app.locals.tradeIns.sweep(); assert.equal(records.trade_in_opportunities[0].channels.sms,'cancelled');
+  user.role='sales_consultant'; assert.equal((await request('/trade-in/service-bookings')).status,403);
+  assert.equal(dayKey(new Date('2026-10-03T13:30:00Z'),3),'2026-10-06');
+});
+test('trade lost-deal calls retain manager accountability and valuation buffers stay private', async t => {
+  const {request,records,user}=await api(t),lead=records.leads[0];
+  lead.status='lost'; lead.owner_id=String(user._id);
+  const notes={requestId:'12345678-1234-1234-1234-123456789abc',reason:'margin',notes:'Customer explained the price difference.'};
+  const post=(path,body)=>request(path,{method:'POST',body:JSON.stringify(body)});
+  const call='/trade-in/loss-followups/'+lead._id;
+  assert.equal((await post(call,notes)).status,200); assert.equal((await post(call,notes)).status,200);
+  assert.equal(lead.diary_entries.length,1);
+  assert.equal((await post(call,{...notes,notes:'Changed'})).status,409);
+  assert.equal((await post(call,{...notes,requestId:'22345678-1234-1234-1234-123456789abc',notes:'Second call'})).status,200);
+  assert.equal((await post(call,notes)).status,200);
+  assert.equal(lead.diary_entries.length,2);
+  const appraisal={_id:new ObjectId(),lead_id:String(lead._id),owner_id:String(user._id),dealership:lead.dealership_name,workflow_status:'ready',revision:0};
+  records.appraisals=[appraisal];
+  const path='/appraisals/'+appraisal._id+'/valuation';
+  let response=await post(path,{revision:0,amountCents:2000000,bufferCents:100000});
+  assert.equal(response.status,200,response.body.error);
+  assert.equal(response.body.data.valuation.valued_by_name,user.name);
+  assert.equal(response.body.data.valuation.buffer_cents,100000);
+  assert.equal((await post(path,{revision:0,amountCents:1})).status,409);
+  user.role='sales_consultant';
+  response=await request('/appraisals/'+appraisal._id);
+  assert.equal(response.body.data.valuation.amount_cents,1900000);
+  assert.equal(response.body.data.valuation.gross_amount_cents,undefined);
+  assert.equal(response.body.data.valuation.buffer_cents,undefined);
+  assert.equal((await post(path,{revision:1,amountCents:1})).status,403);
+  assert.equal((await post(call,{...notes,requestId:'22345678-1234-1234-1234-123456789abc'})).status,403);
+});
+
 test('out-of-window next actions save once, leave Today, and resolve through scoped manager approval', async t => {
   const {request,records,user}=await api(t),lead=records.leads[0];Object.assign(lead,{owner_id:String(user._id),owner_name:user.name,created_at:new Date().toISOString()});
   const post=(path,body)=>request(path,{method:'POST',body:JSON.stringify(body)}), path=`/leads/${lead._id}`;

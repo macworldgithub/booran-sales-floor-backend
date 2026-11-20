@@ -25,6 +25,7 @@ const { installDailyOversight } = require('./lib/daily-oversight');
 const { installPulse, calendarDay } = require('./lib/pulse');
 const { installSalesWorkflows } = require('./lib/sales-workflows');
 const { installAppraisalCentre } = require('./lib/appraisal-centre');
+const { createTradeInService, installTradeInManagement, installPublicTradeIn } = require('./lib/trade-in-opportunities');
 const { installSitePresence } = require('./lib/site-presence');
 const { installProspects, businessId } = require('./lib/prospects');
 const { installLeadAlerts, recordAlert, checkAgedLeads } = require('./lib/lead-alerts');
@@ -104,6 +105,7 @@ app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => {
   if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
     if (req.method === 'PUT' && /^\/(api\/)?leads\/[^/]+\/media\/[^/]+\/content$/.test(req.path)) return next();
+    if (req.method === 'PUT' && /^\/(api\/)?public\/trade-ins\/[^/]+\/photos\/[^/]+\/content$/.test(req.path)) return next();
     if (req.method === 'PUT' && /^\/(api\/)?deliveries\/[^/]+\/accessories\/[^/]+\/proof$/.test(req.path)) return next();
     if (req.body === undefined && !req.headers['content-length'] && !req.headers['transfer-encoding']) req.body = {};
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({ success: false, error: 'The request body must be a JSON object.' });
@@ -169,6 +171,7 @@ router.get('/health', async (req, res) => {
 // ─── AUTH ENDPOINTS ──────────────────────────────────────────────────────────
 
 installPublicMedia(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
+installPublicTradeIn(router, () => resolveDatabase('MONGODB_URI_FLWUP'), storage);
 const sweepLeadAlerts = async () => checkAgedLeads(await getFlwupDb());
 installNexgate(router, nextgate, sweepLeadAlerts);
 installExternalWebhook(router, getFlwupDb);
@@ -187,6 +190,8 @@ installDailyOversight(router, getFlwupDb);
 installExternalLeads(router, getFlwupDb);
 installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
 installAppraisalCentre(router, getFlwupDb);
+app.locals.tradeIns = createTradeInService(getFlwupDb, { sms });
+installTradeInManagement(router, getFlwupDb, app.locals.tradeIns);
 installSitePresence(router, getFlwupDb, storage);
 installLeadAlerts(router, getFlwupDb);
 const onSmsReply = async (lead, id, message) => recordAlert(await getFlwupDb(), lead, id, message);
@@ -881,6 +886,8 @@ if (!process.env.VERCEL) {
     const interval = (work, delay) => timers.push(setInterval(work, delay).unref());
     const server = app.listen(port, host, () => {
       console.log(`Booran Sales Floor API listening on ${host}:${port}`);
+      const checkTradeIns = () => app.locals.tradeIns.sweep().catch(() => console.warn('Trade-in automation check unavailable.'));
+      void checkTradeIns(); interval(checkTradeIns, 60000);
       const refreshInventoryInsights = () => app.locals.inventoryInsights.refresh().catch(() => console.warn('Inventory cost and engagement refresh unavailable.'));
       void refreshInventoryInsights(); interval(refreshInventoryInsights, 15 * 60 * 1000);
 
