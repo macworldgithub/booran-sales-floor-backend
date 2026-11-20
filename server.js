@@ -338,6 +338,7 @@ router.patch('/leads/:id', async (req, res) => {
     updateDoc.$push = { ...updateDoc.$push, activity_events: { date: updateDoc.$set.last_activity_at,
       author_id: req.user.id, author: req.user.name, kind: 'customer_update' } };
     if (req.body.status && req.body.status !== existingLead.status) {
+      if (req.body.status === 'sold') updateDoc.$set.sold_at = updateDoc.$set.last_activity_at;
       query = { ...query, status: existingLead.status, 'loss_review.status': { $ne: 'pending' } };
       updateDoc.$inc = { process_revision: 1 };
       updateDoc.$push.stage_history={from:existingLead.status,to:req.body.status,at:updateDoc.$set.last_activity_at,by:req.user.id};

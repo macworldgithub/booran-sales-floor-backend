@@ -19,10 +19,31 @@ test('approved Lost prospects leave active targets and have a unique daily loss 
  const report=dailyTraffic(data,date,now),alice=report.members.find(row=>row.id==='a');
  assert.equal(alice.newCustomers,1);assert.equal(alice.counts.lost,1);assert.equal(alice.signals.lost,'grey');
  assert.equal(report.summary.counts.lost,1);assert.equal(report._losses[0].leadId,'a1');
- assert.equal(report._tasks.length,0);assert.equal(report._diary.length,0);
+ assert.equal(report._tasks.length,0);assert.ok(report._diary.every(row=>row.leadId!=='a1'));
 });
 test('traffic lights distinguish complete, partial, missing and no-workload states',()=>{
  assert.equal(trafficLight(0,0),'grey');assert.equal(trafficLight(0,2),'red');assert.equal(trafficLight(1,2),'amber');assert.equal(trafficLight(2,2),'green');
+});
+
+test('Diary Items includes new customers without actions, with summary and salesperson counts matching the drilldown',()=>{
+ const data=input();const result=dailyTraffic(data,date,now),alice=result.members.find(row=>row.id==='a');
+ assert.equal(alice.counts.diaryItems,2);assert.equal(alice.coverage.diaryItems,1);assert.equal(alice.signals.diaryItems,'amber');
+ assert.equal(result.summary.counts.diaryItems,4);assert.equal(result._diary.length,4);
+ assert.ok(result._diary.some(row=>row.leadId==='a1'&&row.kind==='new_lead'&&!row.complete));
+ data.tasks.push({_id:'new-customer-task',lead_id:'a1',assignee_id:'a',title:'Phone customer',due_at:at,createdAt:at,status:'open'});
+ const withTask=dailyTraffic(data,date,now);
+ assert.equal(withTask.members.find(row=>row.id==='a').counts.diaryItems,2);
+ assert.equal(withTask._diary.filter(row=>row.leadId==='a1').length,1,'existing diary item represents the new customer once');
+});
+
+test('Sold includes direct sold-stage changes and deduplicates completed-deal outcomes for that customer and day',()=>{
+ const data=input();Object.assign(data.leads[0],{status:'sold',stage_history:[{to:'sold',at}],sold_at:at});
+ let report=dailyTraffic(data,date,now);assert.equal(report.members[0].counts.sales,1);assert.equal(report.summary.counts.sales,1);assert.equal(report._sales.length,1);
+ data.deals.push({_id:'deal',lead_id:'a1',owner_id:'a',status:'completed',completed_at:at});
+ report=dailyTraffic(data,date,now);assert.equal(report.summary.counts.sales,1);assert.equal(report._sales.length,1);
+ data.leads[1].status='sold';data.leads[1].sold_at='2026-11-19T01:00:00Z';
+ report=dailyTraffic(data,date,now);assert.equal(report.summary.counts.sales,1,'older sold outcome is not counted today');
+ assert.equal(report.members[0].signals.sales,'grey');
 });
 test('daily-new targets exclude existing-customer activity and partial actions do not imply complete customer coverage',()=>{
  const result=dailyTraffic(input(),date,now),alice=result.members.find(row=>row.id==='a'),bob=result.members.find(row=>row.id==='b'),charlie=result.members.find(row=>row.id==='c');

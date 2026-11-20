@@ -6,6 +6,20 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('direct Sold changes on older prospects appear in daily Sold counts and the matching drilldown', async t => {
+  const { request, records, user } = await api(t), lead = records.leads[0];
+  Object.assign(lead, { owner_id: String(user._id), created_at: '2020-01-01T00:00:00Z' });
+  const updated = await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ status: 'sold' }) });
+  assert.equal(updated.status, 200, updated.body.error); assert.ok(lead.sold_at);
+  const summary = await request('/daily-traffic'); assert.equal(summary.status, 200, summary.body.error);
+  assert.equal(summary.body.data.summary.counts.sales, 1);
+  const sales = await request('/daily-traffic/actions?metric=sales');
+  assert.equal(sales.body.pagination.total, 1); assert.equal(sales.body.data[0].leadId, String(lead._id));
+  records.deals = [{ _id: new ObjectId(), lead_id: String(lead._id), owner_id: String(user._id), dealership: lead.dealership_name, status: 'completed', completed_at: lead.sold_at }];
+  require('../lib/daily-traffic').trafficCache.clear();
+  assert.equal((await request('/daily-traffic')).body.data.summary.counts.sales, 1);
+});
+
 test('Walk-In and Phone source tags persist and filter alongside existing sources for salesperson intake', async t => {
   const { request, records, user } = await api(t); user.role = 'sales_consultant';
   for (const [index, source] of ['Walk-in Showroom', 'Phone', 'Nextgate', 'Connex'].entries()) {
