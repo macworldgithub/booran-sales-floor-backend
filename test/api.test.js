@@ -1551,9 +1551,14 @@ test('recorded videos remain private during branding and count each viewer event
   const lead = records.leads[0];
   lead.dealership_name = 'South Morang Hyundai';
   const path = `/leads/${lead._id}/media`;
-  const prepared = await request(path, { method: 'POST', body: JSON.stringify({ recorded: true, name: 'walkaround.mp4', content_type: 'video/mp4', size: 100 }) });
+  for (const duration_ms of [0, -1, 180001, '30000']) {
+    assert.equal((await request(path, { method: 'POST', body: JSON.stringify({ recorded: true, name: 'walkaround.mp4', content_type: 'video/mp4', size: 100, duration_ms }) })).status, 400);
+  }
+  const prepared = await request(path, { method: 'POST', body: JSON.stringify({ recorded: true, name: 'walkaround.mp4', content_type: 'video/mp4', size: 100, duration_ms: 30000 }) });
   assert.equal(prepared.status, 201);
   const media = records.message_media[0];
+  assert.equal(media.recorded, true);
+  assert.equal(media.recording_duration_ms, 30000);
   const url = `${baseUrl}/media/${media.share_token}`;
   const completed = await request(`${path}/${media._id}/complete`, { method: 'POST', body: '{}' });
   assert.equal(completed.body.data.status, 'processing');
