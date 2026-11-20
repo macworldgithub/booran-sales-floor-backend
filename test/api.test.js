@@ -2626,3 +2626,52 @@ test('approved loss clears next_action, follow-up fields, completes tasks and ca
   assert.equal(records.sales_tasks[0].status, 'completed');
   assert.equal(records.appointments[0].status, 'Cancelled');
 });
+
+
+test('daily traffic summary and missing-action drills share unique workday coverage and exact scoped priority counts',async t=>{
+ const {request,records,user}=await api(t),{dayKey}=require('../lib/followup-policy'),date=dayKey(),at=new Date(Date.now()-60000).toISOString();
+ const lead=records.leads[0];Object.assign(lead,{owner_id:String(user._id),created_at:at,diary_entries:[{date:at,author_id:String(user._id),note:'Spoke with customer'}]});
+ records.leads[1].created_at='2020-01-01T00:00:00Z';records.leads[2].created_at=at;
+ const other={_id:new ObjectId(),name:'Other rep',role:'sales_consultant',active:true,site:lead.dealership_name};records.users.push(other);
+ const second={...lead,_id:new ObjectId(),customer_name:'Daily second',diary_entries:[],owner_id:String(other._id),loss_review:{status:'pending'}};records.leads.push(second);
+ const unassigned={...second,_id:new ObjectId(),customer_name:'Unassigned daily',owner_id:null,loss_review:undefined};records.leads.push(unassigned);
+ records.lead_merge_requests=[{_id:new ObjectId(),dealership:lead.dealership_name,status:'open'}];
+ records.message_media=[{_id:new ObjectId(),lead_id:String(lead._id),dealership_name:lead.dealership_name,created_at:at,status:'ready',content_type:'video/mp4',user_id:String(user._id)}];
+ records.customer_messages=[1,2].map(i=>({_id:new ObjectId(),lead_id:String(lead._id),dealership_name:lead.dealership_name,created_at:at,status:'sent',user_id:String(user._id),attachments:[{content_type:'video/mp4'}]}));
+ let res=await request('/daily-traffic?date='+date);assert.equal(res.status,200,res.body.error);
+ const data=res.body.data;assert.equal(data.summary.newCustomers,3);assert.equal(data.summary.coverage.videosSent,1);assert.equal(data.summary.signals.videosSent,'amber');
+ assert.equal(data.dailyUnassigned,1);assert.equal(data.priorities.unassigned,1);assert.equal(data.priorities.approvals.loss,1);assert.equal(data.priorities.approvals.merges,1);
+ assert.equal(data._customers,undefined);assert.equal(JSON.stringify(data).includes('Carol'),false);
+ res=await request('/daily-traffic/actions?date='+date+'&metric=videosSent&limit=1');assert.equal(res.body.pagination.total,2);assert.equal(res.body.data.length,1);
+ assert.ok(res.body.data.every(row=>row.leadId!==String(lead._id)));assert.deepEqual(res.body.data[0].missing,['videosSent']);
+ res=await request('/daily-traffic/actions?date='+date+'&member='+user._id+'&metric=videosSent');assert.equal(res.body.pagination.total,0);
+ const queue=await request('/daily-traffic/queue?kind=unassigned');assert.equal(queue.body.pagination.total,1);assert.equal(queue.body.data[0].lead.name,'Unassigned daily');
+ records.sales_tasks=[{_id:new ObjectId(),lead_id:String(lead._id),dealership:lead.dealership_name,assignee_id:String(user._id),status:'open',due_at:at}];
+ require('../lib/daily-traffic').trafficCache.clear();
+ const all=(await request('/daily-traffic/actions?member='+user._id+'&metric=all')).body.data;assert.ok(all.some(row=>row.kind==='task'),'salesperson row includes overdue tasks as well as missing customer actions');
+ assert.equal((await request('/daily-traffic/actions?member='+records.leads[2]._id)).status,404);
+ assert.equal((await request('/daily-traffic?date=2026-02-31')).status,400);assert.equal((await request('/daily-traffic?date=2099-01-01')).status,400);
+ assert.equal((await request('/daily-traffic/actions?metric=invalid')).status,400);
+});
+
+test('daily traffic enforces salesperson ownership across messages, tasks, priorities and member drilldowns',async t=>{
+ const {request,records,user}=await api(t),at=new Date(Date.now()-1000).toISOString();
+ user.role='sales_consultant';Object.assign(records.leads[0],{owner_id:String(user._id),created_at:at});
+ const foreign={...records.leads[0],_id:new ObjectId(),owner_id:String(new ObjectId()),customer_name:'Hidden teammate'};records.leads.push(foreign);
+ records.customer_messages=[{_id:new ObjectId(),lead_id:String(foreign._id),dealership_name:foreign.dealership_name,user_id:String(user._id),status:'sent',created_at:at,attachments:[{content_type:'video/mp4'}]}];
+ records.sales_tasks=[{_id:new ObjectId(),lead_id:String(foreign._id),dealership:foreign.dealership_name,assignee_id:foreign.owner_id,status:'open',due_at:at}];
+ let res=await request('/daily-traffic');assert.equal(res.status,200,res.body.error);assert.equal(res.body.data.members.length,1);assert.equal(res.body.data.summary.newCustomers,1);
+ assert.equal(res.body.data.summary.counts.videosSent,0);assert.equal(res.body.data.summary.targets.tasksCompleted,0);assert.equal(res.body.data.priorities.unassigned,0);assert.equal(res.body.data.priorities.approvals.total,0);
+ assert.ok(!JSON.stringify(res.body).includes('Hidden teammate'));
+ assert.equal((await request('/daily-traffic/actions?member='+foreign.owner_id)).status,404);
+ assert.equal((await request('/daily-traffic/queue?kind=unassigned')).status,403);
+ user.role='contractor';assert.equal((await request('/daily-traffic')).status,403);
+});
+
+test('daily traffic invalidates cached allocation state after an authorized assignment',async t=>{
+ const {request,records,user}=await api(t),lead=records.leads[0];lead.created_at=new Date().toISOString();
+ assert.equal((await request('/daily-traffic')).body.data.priorities.unassigned,1);
+ const assigned=await request('/leads/'+lead._id+'/assignment',{method:'PATCH',body:JSON.stringify({assigneeId:String(user._id),expectedOwnerId:null})});
+ assert.equal(assigned.status,200,assigned.body.error);
+ const data=(await request('/daily-traffic')).body.data;assert.equal(data.priorities.unassigned,0);assert.equal(data.members.find(row=>row.id===String(user._id)).newCustomers,1);
+});

@@ -22,6 +22,7 @@ const { processVideoJobs } = require('./lib/video-jobs');
 const { installExternalWebhook, installExternalLeads } = require('./lib/external-leads');
 const { installLeadProcess } = require('./lib/lead-process');
 const { installDailyOversight } = require('./lib/daily-oversight');
+const { installDailyTraffic } = require('./lib/daily-traffic');
 const { installPulse, calendarDay } = require('./lib/pulse');
 const { installCrmReport } = require('./lib/crm-report');
 const { installSalesWorkflows } = require('./lib/sales-workflows');
@@ -70,7 +71,7 @@ async function database(envKey, lane = 'application') {
 function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
 const app = express();
 app.use((req,res,next)=>{
-  res.on('finish',()=>{if(res.statusCode<300 && !['GET','HEAD','OPTIONS'].includes(req.method))require('./lib/crm-report').caches.clear();});
+  res.on('finish',()=>{if(res.statusCode<300 && !['GET','HEAD','OPTIONS'].includes(req.method)){require('./lib/crm-report').caches.clear();require('./lib/daily-traffic').trafficCache.clear();}});
   next();
 });
 const inventoryInsights = createInventoryInsightsService(resolveDatabase);
@@ -193,6 +194,7 @@ installLeadProcess(router, getFlwupDb);
 require('./lib/crm-updates').installCrmUpdates(router, getFlwupDb);
 require('./lib/video-library').installVideoLibrary(router, getFlwupDb);
 installDailyOversight(router, getFlwupDb);
+installDailyTraffic(router, getFlwupDb);
 installExternalLeads(router, getFlwupDb);
 installSalesWorkflows(router, getFlwupDb, getBooranDb, storage);
 installAppraisalCentre(router, getFlwupDb);
