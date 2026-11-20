@@ -332,6 +332,7 @@ router.patch('/leads/:id', async (req, res) => {
     query = { ...query, merged_into: { $exists: false } };
     if (existingLead.loss_review?.status === 'pending' && req.body.status && req.body.status !== existingLead.status) invalid('Resolve the pending loss review before changing the lead stage.');
     const updateDoc = leadUpdate(req.body, req.user);
+    const managerNoteChanged = Boolean(req.body.newNote || (Object.hasOwn(updateDoc.$set, 'notes') && updateDoc.$set.notes !== existingLead.notes));
     updateDoc.$set.last_activity_at = new Date().toISOString();
     updateDoc.$set.last_activity_by = req.user.id;
     updateDoc.$push = { ...updateDoc.$push, activity_events: { date: updateDoc.$set.last_activity_at,
@@ -366,6 +367,10 @@ router.patch('/leads/:id', async (req, res) => {
       result = outcome.lead;
     } else result = await db.collection('leads').findOneAndUpdate(query, updateDoc, { returnDocument: 'after' });
     if (!result) return res.status(404).json({ success: false, error: 'Lead not found.' });
+    if (isManager(req.user) && result.owner_id && result.owner_id !== req.user.id &&
+      managerNoteChanged) {
+      await require('./lib/crm-updates').notify(await getFlwupDb(), result, 'manager_note', updateDoc.$set.last_activity_at);
+    }
     res.json({ success: true, data: serializeLead(result) });
   } catch (err) {
     res.status([400, 403, 404, 409].includes(err.status) ? err.status : 500).json({ success: false, error: [400, 403, 404, 409].includes(err.status) ? err.message : 'The request could not be completed. Please retry.', ...(err.status === 409 && err.details ? err.details : {}) });

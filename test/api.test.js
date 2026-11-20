@@ -6,6 +6,64 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('Walk-In and Phone source tags persist and filter alongside existing sources for salesperson intake', async t => {
+  const { request, records, user } = await api(t); user.role = 'sales_consultant';
+  for (const [index, source] of ['Walk-in Showroom', 'Phone', 'Nextgate', 'Connex'].entries()) {
+    const result = await request('/prospects', { method: 'POST', body: JSON.stringify({ name: 'Source fixture ' + index, customer_phone: '+6140011122' + index, dealership_name: 'BYD South Morang', source }) });
+    assert.equal(result.status, 201, result.body.error); assert.equal(result.body.data.source, source);
+    const saved = records.leads.find(lead => String(lead._id) === result.body.data._id);
+    assert.equal(saved.source, source); assert.equal(saved.owner_id, String(user._id));
+    const filtered = await request('/leads?source=' + encodeURIComponent(source));
+    assert.equal(filtered.body.pagination.total, 1); assert.equal(filtered.body.data[0].source, source);
+  }
+});
+
+test('manager note additions and edits notify the current salesperson once and maintain independent reads and edit history', async t => {
+  const { request, records } = await api(t), lead = records.leads[0];
+  const rep = { _id: new ObjectId(), name: 'Fixture rep', email: 'rep@example.test', role: 'sales_consultant', site: lead.dealership_name, active: true };
+  records.users.push(rep); lead.owner_id = String(rep._id);
+  const token = 'b'.repeat(64); records.sessions.push({ _id: createHash('sha256').update(token).digest('hex'), userId: rep._id, expiresAt: new Date(Date.now() + 3600000) });
+  const asRep = { cookie: 'booran_session=' + token };
+  const add = { note: 'Manager instructions', requestId: '11111111-1111-4111-8111-111111111111' };
+  const path = `/leads/${lead._id}/notes`;
+  let result = await request(path, { method: 'POST', body: JSON.stringify(add) }); assert.equal(result.status, 200);
+  assert.equal((await request(path, { method: 'POST', body: JSON.stringify(add) })).status, 200);
+  assert.equal(records.sales_alerts.filter(alert => alert.kind === 'manager_note').length, 1);
+  const feedPath = '/lead-alerts?kind=manager_note&unread=true';
+  let feed = await request(feedPath, { headers: asRep }); assert.equal(feed.body.pagination.total, 1);
+  const alertId = feed.body.data[0]._id;
+  assert.equal((await request(`/lead-alerts/${alertId}/read`, { method: 'PATCH', body: '{}', headers: asRep })).status, 200);
+  assert.equal((await request(feedPath, { headers: asRep })).body.pagination.total, 0);
+  assert.equal((await request(feedPath)).body.pagination.total, 1, 'manager read state remains independent');
+  const noteId = result.body.data.diary_entries[0].id;
+  const edit = { note: 'Updated manager instructions', expectedNote: add.note, requestId: '22222222-2222-4222-8222-222222222222' };
+  result = await request(`${path}/${noteId}`, { method: 'PATCH', body: JSON.stringify(edit) }); assert.equal(result.status, 200, result.body.error);
+  assert.equal((await request(`${path}/${noteId}`, { method: 'PATCH', body: JSON.stringify(edit) })).status, 200);
+  assert.equal(lead.diary_entries[0].edits[0].note, add.note); assert.equal(lead.diary_entries[0].edits.length, 1);
+  assert.equal(records.sales_alerts.filter(alert => alert.kind === 'manager_note').length, 2);
+  assert.equal((await request(`${path}/${noteId}`, { method: 'PATCH', headers: asRep, body: JSON.stringify(edit) })).status, 403);
+  assert.equal((await request(`${path}/${noteId}`, { method: 'PATCH', body: JSON.stringify({ ...edit, requestId: '33333333-3333-4333-8333-333333333333' }) })).status, 409);
+  await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ notes: 'Updated profile notes' }) });
+  assert.equal(records.sales_alerts.filter(alert => alert.kind === 'manager_note').length, 3);
+});
+
+test('daily diary exposes carry-forward work to its salesperson and manager and hides closed and out-of-scope work', async t => {
+  const { request, records, user } = await api(t), lead = records.leads[0], id = String(user._id);
+  Object.assign(lead, { owner_id: id, created_at: '2020-01-01T00:00:00Z' });
+  const task = { _id: new ObjectId(), dealership: lead.dealership_name, lead_id: String(lead._id), assignee_id: id, title: 'Overdue diary fixture', due_at: '2020-01-01T00:00:00Z', createdAt: '2020-01-01T00:00:00Z', status: 'open' };
+  records.sales_tasks = [task, { ...task, _id: new ObjectId(), dealership: 'Booran Cheltenham', lead_id: String(records.leads[2]._id) }];
+  let result = await request('/daily-traffic/diary?member=' + id); assert.equal(result.status, 200, result.body.error);
+  assert.equal(result.body.pagination.total, 1); assert.equal(result.body.data[0].carriedForward, true);
+  assert.equal(result.body.data[0].originalDueAt, task.due_at);
+  user.role = 'sales_consultant';
+  assert.equal((await request('/daily-traffic/diary?member=' + id)).body.pagination.total, 1);
+  assert.equal((await request('/daily-traffic/diary?member=' + new ObjectId())).status, 404);
+  lead.status = 'lost'; lead.loss_review = { status: 'approved' }; require('../lib/daily-traffic').trafficCache.clear();
+  assert.equal((await request('/daily-traffic/diary?member=' + id)).body.pagination.total, 0);
+  assert.equal((await request('/sales-tasks?status=open')).body.pagination.total, 0);
+  assert.equal((await request(`/sales-tasks/${task._id}`, { method: 'PATCH', body: '{"status":"open"}' })).status, 409);
+});
+
 test('internal drives retain start/finish history, reject conflicting retries and enforce scope', async t => {
   const { request, records, user } = await api(t), lead = records.leads[0];
   lead.owner_id = String(user._id);
@@ -1224,6 +1282,7 @@ function matches(record, query) {
     if (value && typeof value === 'object' && !(value instanceof ObjectId) && !(value instanceof Date)) {
       return Object.entries(value).every(([operator, expected]) => {
         switch (operator) {
+          case '$eq': return JSON.stringify(actual) === JSON.stringify(expected);
           case '$regex': return (Array.isArray(actual) ? actual : [actual]).some(item => typeof item === 'string' && new RegExp(expected, value.$options).test(item));
           case '$options': return true;
           case '$exists': return (actual !== undefined) === expected;

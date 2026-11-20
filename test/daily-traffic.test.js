@@ -12,6 +12,15 @@ function input(){
  ],media:[{_id:'v1',lead_id:'a1',user_id:'a',status:'ready',content_type:'video/mp4',created_at:at}],
  messages:[{_id:'m1',lead_id:'a1',user_id:'a',status:'sent',created_at:at,attachments:[{content_type:'video/mp4',id:'v1'}]}],tasks:[],deals:[],appointments:[]};
 }
+
+test('approved Lost prospects leave active targets and have a unique daily loss count attributed to their salesperson',()=>{
+ const data=input(); Object.assign(data.leads[0],{status:'lost',lost_at:at,loss_review:{status:'approved',reviewed_at:at}});
+ data.tasks.push({_id:'closed-task',lead_id:'a1',assignee_id:'a',status:'open',due_at:at,createdAt:at});
+ const report=dailyTraffic(data,date,now),alice=report.members.find(row=>row.id==='a');
+ assert.equal(alice.newCustomers,1);assert.equal(alice.counts.lost,1);assert.equal(alice.signals.lost,'grey');
+ assert.equal(report.summary.counts.lost,1);assert.equal(report._losses[0].leadId,'a1');
+ assert.equal(report._tasks.length,0);assert.equal(report._diary.length,0);
+});
 test('traffic lights distinguish complete, partial, missing and no-workload states',()=>{
  assert.equal(trafficLight(0,0),'grey');assert.equal(trafficLight(0,2),'red');assert.equal(trafficLight(1,2),'amber');assert.equal(trafficLight(2,2),'green');
 });
