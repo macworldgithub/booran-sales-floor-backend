@@ -6,6 +6,50 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('stale merge reviews for already-merged incoming customers clear safely and retry without duplicating history', async t => {
+  const {request,records,user}=await api(t),primary=records.leads[0],site=primary.dealership_name;
+  primary.customer_phone='+61481711893';primary.customer_email='';primary.owner_id=String(user._id);primary.status='following_up';
+  const secondary={_id:new ObjectId(),dealership_name:site,customer_name:'SMS Connect Prospect',customer_phone:primary.customer_phone,merged_into:String(primary._id)};
+  records.leads.push(secondary);
+  primary.source_refs=[{provider_id:String(secondary._id),source:'DealerSocket',external:{model:'Current source details'}}];
+  const incoming={...secondary,merged_into:undefined,customer_email:'missing@example.test',notes:'Imported enquiry details',source:'DealerSocket',external:{model:'Outdated snapshot'},loss_review:{status:'pending'},next_action:{title:'Old resolved follow-up'}};
+  const stamp=new Date(Date.now()-1000);records.lead_merge_requests=[{_id:'stale-fixture',dealership:site,phone:primary.customer_phone,status:'open',updatedAt:stamp,incoming,candidate_ids:[String(primary._id)]}];
+  records.lead_email_receipts=[{_id:'receipt',merge_request_id:'stale-fixture',status:'merge_review'}];
+  let response=await request('/merge-requests');assert.equal(response.status,200,response.body.error);assert.equal(response.body.data[0].incomingPrimaryId,String(primary._id));
+  const payload={primaryId:String(primary._id),expectedUpdatedAt:stamp.toISOString()},resolve=()=>request('/merge-requests/stale-fixture/resolve',{method:'POST',body:JSON.stringify(payload)});
+  response=await resolve();assert.equal(response.status,200,response.body.error);assert.equal(primary.customer_email,'missing@example.test');assert.equal(records.lead_merge_requests[0].status,'merged');
+  assert.equal(records.lead_email_receipts[0].lead_id,String(primary._id));assert.equal(secondary.merged_into,String(primary._id));assert.equal(primary.owner_id,String(user._id));assert.equal(primary.status,'following_up');
+  assert.equal(primary.source_refs.find(row=>row.provider_id===String(secondary._id)).external.model,'Current source details');assert.equal(primary.loss_review,undefined);assert.equal(primary.next_action,undefined);
+  const notes=primary.diary_entries.length,revision=primary.process_revision;response=await resolve();assert.equal(response.status,200,response.body.error);assert.equal(primary.diary_entries.length,notes);assert.equal(primary.process_revision,revision);
+  assert.equal((await request('/merge-requests')).body.pagination.total,0);
+});
+
+test('merge reviews resolve retired candidate aliases and reject redirecting an incoming enquiry to a different live customer',async t=>{
+  const {request,records}=await api(t),primary=records.leads[0],site=primary.dealership_name;primary.customer_phone='+61469362913';
+  const survivor={_id:new ObjectId(),dealership_name:site,customer_name:'Current primary',customer_phone:primary.customer_phone,status:'following_up'};
+  const retiredCandidate={_id:new ObjectId(),dealership_name:site,merged_into:String(primary._id)};
+  const incoming={_id:new ObjectId(),dealership_name:site,customer_name:'Incoming enquiry',customer_phone:primary.customer_phone,merged_into:String(survivor._id)};
+  records.leads.push(survivor,retiredCandidate,incoming);const at=new Date();
+  records.lead_merge_requests=[{_id:'alias-fixture',dealership:site,phone:primary.customer_phone,status:'open',updatedAt:at,incoming:{...incoming,merged_into:undefined},candidate_ids:[String(retiredCandidate._id)]}];
+  const listed=await request('/merge-requests');assert.equal(listed.status,200,listed.body.error);const review=listed.body.data[0];
+  assert.deepEqual(new Set(review.candidates.map(row=>row._id)),new Set([String(primary._id),String(survivor._id)]));assert.equal(review.incomingPrimaryId,String(survivor._id));
+  const resolve=id=>request('/merge-requests/alias-fixture/resolve',{method:'POST',body:JSON.stringify({primaryId:id,expectedUpdatedAt:at.toISOString()})});
+  let result=await resolve(String(primary._id));assert.equal(result.status,409);assert.equal(records.lead_merge_requests[0].status,'open');assert.equal(incoming.merged_into,String(survivor._id));
+  result=await resolve(String(survivor._id));assert.equal(result.status,200,result.body.error);assert.equal(records.lead_merge_requests[0].primary_id,String(survivor._id));assert.equal(primary.merged_into,undefined);
+});
+
+test('source-linked merge reviews clear without creating records and cross-site merge chains never expose or change foreign customers',async t=>{
+  const {request,records}=await api(t),primary=records.leads[0],foreign=records.leads[2],site=primary.dealership_name;primary.customer_phone='+61469362913';
+  const incoming={_id:new ObjectId(),dealership_name:site,customer_name:'Source enquiry',customer_phone:primary.customer_phone,source:'DealerSocket',notes:'Source alias'};
+  const at=new Date();records.lead_source_links=[{_id:String(incoming._id),lead_id:String(primary._id),dealership:site}];
+  records.lead_merge_requests=[{_id:'linked-fixture',dealership:site,phone:primary.customer_phone,status:'open',updatedAt:at,incoming,candidate_ids:[String(primary._id)]}];
+  const count=records.leads.length;let result=await request('/merge-requests/linked-fixture/resolve',{method:'POST',body:JSON.stringify({primaryId:String(primary._id),expectedUpdatedAt:at.toISOString()})});
+  assert.equal(result.status,200,result.body.error);assert.equal(records.leads.length,count);assert.equal(records.lead_source_links[0].lead_id,String(primary._id));
+  records.leads.push({...incoming,merged_into:String(foreign._id)});records.lead_merge_requests[0].status='open';
+  result=await request('/merge-requests');assert.equal(result.status,200);assert.equal(result.body.data[0].incomingPrimaryId,null);assert.ok(!JSON.stringify(result.body).includes(foreign.customer_name));
+  result=await request('/merge-requests/linked-fixture/resolve',{method:'POST',body:JSON.stringify({primaryId:String(primary._id),expectedUpdatedAt:at.toISOString()})});assert.equal(result.status,409);assert.equal(records.lead_merge_requests[0].status,'open');
+});
+
 test('Dealer Principal dashboards and drilldowns isolate sites and financial data by management role', async t => {
   const { request, records, user } = await api(t), at = new Date(Date.now()-60000).toISOString();
   records.rooftops = [{name:'BYD South Morang'},{name:'South Morang Kia'},{name:'Booran Cheltenham'}];
@@ -2778,6 +2822,10 @@ test('daily traffic summary and missing-action drills share unique workday cover
  const data=res.body.data;assert.equal(data.summary.newCustomers,3);assert.equal(data.summary.coverage.videosSent,1);assert.equal(data.summary.signals.videosSent,'amber');
  assert.equal(data.dailyUnassigned,1);assert.equal(data.priorities.unassigned,1);assert.equal(data.priorities.approvals.loss,1);assert.equal(data.priorities.approvals.merges,1);
  assert.equal(data._customers,undefined);assert.equal(JSON.stringify(data).includes('Carol'),false);
+ res=await request('/daily-traffic/customers?date='+date);assert.equal(res.status,200,res.body.error);assert.equal(res.body.pagination.total,3);
+ assert.equal(res.body.data.find(row=>row.id===String(lead._id)).coverage.videosSent,true,'the restored tracker includes completed coverage as well as missing actions');
+ assert.equal(res.body.data.find(row=>row.id===String(unassigned._id)).ownerName,'Unassigned');assert.ok(!JSON.stringify(res.body).includes('Carol'));
+ res=await request('/daily-traffic/customers?date='+date+'&limit=1&page=2');assert.equal(res.body.data.length,1);assert.equal(res.body.pagination.total,3);
  res=await request('/daily-traffic/actions?date='+date+'&metric=videosSent&limit=1');assert.equal(res.body.pagination.total,2);assert.equal(res.body.data.length,1);
  assert.ok(res.body.data.every(row=>row.leadId!==String(lead._id)));assert.deepEqual(res.body.data[0].missing,['videosSent']);
  res=await request('/daily-traffic/actions?date='+date+'&member='+user._id+'&metric=videosSent');assert.equal(res.body.pagination.total,0);
@@ -2799,9 +2847,11 @@ test('daily traffic enforces salesperson ownership across messages, tasks, prior
  let res=await request('/daily-traffic');assert.equal(res.status,200,res.body.error);assert.equal(res.body.data.members.length,1);assert.equal(res.body.data.summary.newCustomers,1);
  assert.equal(res.body.data.summary.counts.videosSent,0);assert.equal(res.body.data.summary.targets.tasksCompleted,0);assert.equal(res.body.data.priorities.unassigned,0);assert.equal(res.body.data.priorities.approvals.total,0);
  assert.ok(!JSON.stringify(res.body).includes('Hidden teammate'));
+ res=await request('/daily-traffic/customers');assert.equal(res.status,200);assert.equal(res.body.pagination.total,1);assert.ok(!JSON.stringify(res.body).includes('Hidden teammate'));
+ assert.equal((await request('/daily-traffic/customers?member='+foreign.owner_id)).status,404);
  assert.equal((await request('/daily-traffic/actions?member='+foreign.owner_id)).status,404);
  assert.equal((await request('/daily-traffic/queue?kind=unassigned')).status,403);
- user.role='contractor';assert.equal((await request('/daily-traffic')).status,403);
+ user.role='contractor';assert.equal((await request('/daily-traffic')).status,403);assert.equal((await request('/daily-traffic/customers')).status,403);
 });
 
 test('daily traffic invalidates cached allocation state after an authorized assignment',async t=>{
