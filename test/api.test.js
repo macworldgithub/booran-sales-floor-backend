@@ -685,6 +685,37 @@ test('Connex releases hidden details through the configured manager while preser
   service.client.settings.writes=false;assert.equal((await service.revealContacts(db,source)).preserveOwner,false);assert.equal(calls.length,1);
 });
 
+test('pulling a masked Connex lead allocates to Mark in Connex, unmasks contact details, and assigns Mark in Sales Floor', async () => {
+  const { ConnexService } = require('../lib/connex-service'), { ingestSnapshot } = require('../lib/connex-store');
+  const mark = { _id: new ObjectId(), name: 'Mark Robinson', active: true, role: 'sales_manager', site: 'South Morang Hyundai' };
+  const records = { users: [mark] }, db = fixtureDb(records), calls = [];
+  const source = connexFixture({ phone: '', email: '', salesperson: '' });
+  const service = new ConnexService(async () => db, {
+    configured: true,
+    settings: { writes: true },
+    apply: async action => {
+      calls.push(action);
+      return { ...source, name: 'John Doe', phone: '0412345678', email: 'john@example.com', salesperson: 'Mark', stage: 'Accepted' };
+    }
+  });
+  await ingestSnapshot(db, source);
+  assert.equal(records.leads[0].owner_id, null);
+  assert.equal(records.leads[0].owner_name, 'Unassigned');
+  assert.equal(records.leads[0].customer_phone, '');
+
+  const revealed = await service.revealContacts(db, source);
+  assert.equal(calls[0].salesperson, mark.name);
+  assert.equal(calls[0].action, 'accept');
+
+  await ingestSnapshot(db, revealed.snapshot, { preserveOwner: revealed.preserveOwner });
+  assert.equal(records.leads[0].owner_id, String(mark._id));
+  assert.equal(records.leads[0].owner_name, 'Mark Robinson');
+  assert.equal(records.leads[0].customer_name, 'John Doe');
+  assert.equal(records.leads[0].customer_phone, '+61412345678');
+  assert.equal(records.leads[0].customer_email, 'john@example.com');
+  assert.equal(records.integration_sync.find(r => r.recordId === source.recordId).detailsPending, false);
+});
+
 test('lead status returns only scoped feed checkpoints without enquiry history or internal state', async t => {
   const {request,records,user}=await api(t);user.site='South Morang Hyundai';
   records.integration_sync=[{_id:'feed',kind:'dealersocket',dealership:user.site,sourceRecords:123,lease_token:'private-control',snapshot:{name:'Private customer'}},

@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { ConnexClient, readRecordFields } = require('../lib/connex-client');
+const { ConnexClient, readRecordFields, personMatches } = require('../lib/connex-client');
 test('an expired session encountered during navigation signs in again and resumes the original record', async () => {
   const client = new ConnexClient({ writes: true }); let expired = true, signIns = 0; const visited = [];
   client.page = { goto: async url => visited.push(url), getByPlaceholder: () => ({ waitFor: async () => {}, isVisible: async () => expired }) };
@@ -58,4 +58,16 @@ test('Connex verifies a note marker before deciding whether it must be posted', 
   const client = new ConnexClient({ writes: true });
   client.read = async () => ({ stage: 'Accepted', latestNote: 'Existing note [Sales Floor fixture-note-123]' });
   assert.match((await client.apply({ action: 'note', requestId: 'fixture-note-123' })).latestNote, /fixture-note-123/);
+});
+
+test('personMatches matches exact, first name, and prefix variants between portal and CRM', () => {
+  assert.equal(personMatches('Mark Robinson', 'Mark Robinson'), true);
+  assert.equal(personMatches('Mark', 'Mark Robinson'), true);
+  assert.equal(personMatches('Mark Robinson', 'Mark'), true);
+  assert.equal(personMatches('Quoc Truong', 'Quoc'), true);
+  assert.equal(personMatches('Paul Daoud', 'Paul'), true);
+  assert.equal(personMatches('Mark Robinson', 'Paul'), false);
+  assert.equal(personMatches('Paul', 'Mark'), false);
+  assert.equal(personMatches('', 'Mark'), false);
+  assert.equal(personMatches('Mark', ''), true);
 });
