@@ -71,7 +71,7 @@ async function database(envKey, lane = 'application') {
 function createApp({ database: resolveDatabase = database, sms = mobileMessage, storage: providedStorage, nexgate, connex } = {}) {
 const app = express();
 app.use((req,res,next)=>{
-  res.on('finish',()=>{if(res.statusCode<300 && !['GET','HEAD','OPTIONS'].includes(req.method)){require('./lib/crm-report').caches.clear();require('./lib/daily-traffic').trafficCache.clear();}});
+  res.on('finish',()=>{if(res.statusCode<300 && !['GET','HEAD','OPTIONS'].includes(req.method)){require('./lib/crm-report').caches.clear();require('./lib/daily-traffic').trafficCache.clear();require('./lib/dp/report').cache.clear();}});
   next();
 });
 const inventoryInsights = createInventoryInsightsService(resolveDatabase);
@@ -189,6 +189,7 @@ installConnex(router, getFlwupDb, app.locals.connex);
 installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
+require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb);
 installCrmReport(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb);
 require('./lib/crm-updates').installCrmUpdates(router, getFlwupDb);
@@ -905,6 +906,17 @@ if (!process.env.VERCEL) {
       void checkTradeIns(); interval(checkTradeIns, 60000);
       const refreshInventoryInsights = () => app.locals.inventoryInsights.refresh().catch(() => console.warn('Inventory cost and engagement refresh unavailable.'));
       void refreshInventoryInsights(); interval(refreshInventoryInsights, 15 * 60 * 1000);
+      let dpSnapshotRunning = false;
+      const snapshotDpInventory = async () => {
+        if (dpSnapshotRunning) return; dpSnapshotRunning = true;
+        try {
+          const [crm, inventory] = await Promise.all([getFlwupDb(), getBooranDb()]);
+          await require('./lib/dp/snapshots').captureInventorySnapshot(crm, inventory);
+          require('./lib/dp/report').cache.clear();
+        } catch { console.warn('Dealer Principal stock history capture unavailable.'); }
+        finally { dpSnapshotRunning = false; }
+      };
+      void snapshotDpInventory(); interval(snapshotDpInventory, HOUR);
 
       if (app.locals.nextgate.configured) {
         const reconcile = () => app.locals.nextgate.sync().then(result => {

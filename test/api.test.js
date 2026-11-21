@@ -6,6 +6,60 @@ const { createApp } = require('../server');
 const { hashPassword } = require('../lib/password');
 const { syncSmsCampaign } = require('../lib/sms-campaign-sync');
 
+test('Dealer Principal dashboards and drilldowns isolate sites and financial data by management role', async t => {
+  const { request, records, user } = await api(t), at = new Date(Date.now()-60000).toISOString();
+  records.rooftops = [{name:'BYD South Morang'},{name:'South Morang Kia'},{name:'Booran Cheltenham'}];
+  records.deals = [
+    {_id:new ObjectId(),dealership:'BYD South Morang',lead_id:String(records.leads[0]._id),owner_id:String(user._id),status:'completed',completed_at:at,gross_cents:123400},
+    {_id:new ObjectId(),dealership:'Booran Cheltenham',lead_id:String(records.leads[2]._id),status:'completed',completed_at:at,gross_cents:99999900},
+  ];
+  let response = await request('/dp/dashboard'); assert.equal(response.status,200,response.body.error);
+  assert.equal(response.body.data.sales.units,1); assert.equal(response.body.data.sales.grossCents,123400);
+  assert.equal(response.body.data._rows,undefined); assert.ok(!JSON.stringify(response.body).includes('99999900'));
+  assert.equal((await request('/dp/dashboard?rooftop=Booran%20Cheltenham')).status,403);
+  assert.equal((await request('/dp/drilldown?kind=sales&site=Booran%20Cheltenham')).status,403);
+  assert.equal((await request('/dp/drilldown?kind=sales')).body.pagination.total,1);
+  for(const role of ['sales_consultant','contractor']) {user.role=role;assert.equal((await request('/dp/dashboard')).status,403);assert.equal((await request('/dp/drilldown?kind=inventory')).status,403);assert.equal((await request('/dp/sales/import',{method:'POST',body:'{"records":[]}'})).status,403);}
+});
+
+test('DP service observations are weighted, revision-protected, audited and safe to retry without duplicates', async t => {
+  const { request, records } = await api(t), date = require('../lib/followup-policy').dayKey();
+  const route='/dp/service-entry?rooftop=BYD%20South%20Morang';
+  const input={dealership:'BYD South Morang',date,department:'Service',revision:0,requestId:'12345678-1234-4234-8234-123456789abc',csiPoints:900,csiResponses:10,productiveHours:9,availableHours:10,revenueCents:100000};
+  const save=body=>request(route,{method:'PUT',body:JSON.stringify(body)});
+  let response=await save(input);assert.equal(response.status,200,response.body.error);assert.equal(response.body.data.revision,1);
+  response=await save(input);assert.equal(response.status,200);assert.equal(records.dp_service_entries.length,1);assert.equal(records.dp_service_entries[0].revision,1);
+  assert.equal((await save({...input,csiPoints:901})).status,409);
+  assert.equal((await save({...input,requestId:'22345678-1234-4234-8234-123456789abc'})).status,409);
+  response=await save({...input,revision:1,requestId:'32345678-1234-4234-8234-123456789abc',csiPoints:910});assert.equal(response.status,200,response.body.error);assert.equal(records.dp_service_entries[0].history.length,1);
+  const report=(await request('/dp/dashboard?rooftop=BYD%20South%20Morang')).body.data;
+  assert.equal(report.service.csi,91);assert.equal(report.service.revenueCents,100000);assert.equal(report.service.technicianEfficiency,90);
+  assert.equal((await request('/dp/service-entry?rooftop=BYD%20South%20Morang&date='+date+'&department=Service')).body.data.revision,2);
+});
+
+test('DP target settings, module configuration, custom KPI thresholds and site onboarding preserve access boundaries', async t => {
+  const { request, records, user } = await api(t);
+  const save=body=>request('/dp/settings?rooftop=BYD%20South%20Morang',{method:'PATCH',body:JSON.stringify(body)});
+  let response=await save({revision:0,monthlyUnitsTarget:40,annualUnitsTarget:450,widgets:['sales','inventory','service'],customKpis:[{title:'Stock ceiling',metric:'stockUnits',direction:'below',target:5}]});
+  assert.equal(response.status,200,response.body.error);assert.equal(response.body.data.revision,1);
+  assert.equal((await save({revision:0,monthlyUnitsTarget:10})).status,409);
+  const report=(await request('/dp/dashboard?rooftop=BYD%20South%20Morang')).body.data;assert.equal(report.sales.target,40);assert.equal(report.customKpis[0].metric,'stockUnits');
+  assert.equal((await request('/dp/sites',{method:'POST',body:'{"name":"New Site"}'})).status,403);
+  const previousSite=user.site;user.role='super_admin';response=await request('/dp/sites',{method:'POST',body:'{"name":"New Site"}'});assert.equal(response.status,201,response.body.error);
+  assert.ok(records.rooftops.some(row=>row.name==='New Site'));assert.equal(user.site,previousSite);
+});
+
+test('DP sales imports reconcile by source reference, reject cross-site batches before writing and support cancelled corrections', async t => {
+  const { request, records } = await api(t), at = new Date(Date.now()-60000).toISOString();
+  const input={externalId:'DMS-fixture',site:'BYD South Morang',date:at,grossCents:45600,ownerName:'Fixture salesperson'};
+  const post=records=>request('/dp/sales/import?rooftop=BYD%20South%20Morang',{method:'POST',body:JSON.stringify({records})});
+  assert.equal((await post([input])).status,200);assert.equal((await post([input])).status,200);assert.equal(records.dp_sales_events.length,1);
+  assert.equal((await post([input,{...input,site:'Booran Cheltenham'}])).status,403);assert.equal(records.dp_sales_events.length,1);
+  assert.equal((await request('/dp/dashboard?rooftop=BYD%20South%20Morang')).body.data.sales.grossCents,45600);
+  assert.equal((await post([{...input,status:'cancelled'}])).status,200);
+  assert.equal((await request('/dp/dashboard?rooftop=BYD%20South%20Morang')).body.data.sales.units,0);
+});
+
 test('direct Sold changes on older prospects appear in daily Sold counts and the matching drilldown', async t => {
   const { request, records, user } = await api(t), lead = records.leads[0];
   Object.assign(lead, { owner_id: String(user._id), created_at: '2020-01-01T00:00:00Z' });
@@ -1373,7 +1427,11 @@ function fixtureDb(records) {
       },
       async findOneAndUpdate(query, update, options = {}) {
         let row = rows.find((item) => matches(item, query));
-        if (!row && options.upsert) { row = { ...query, ...update.$setOnInsert }; rows.push(row); }
+        if (!row && options.upsert) {
+          const equalityFields = value => Object.assign({}, ...Object.entries(value).flatMap(([field, expected]) => field === '$and' ? expected.map(equalityFields) :
+            !field.startsWith('$') && (expected === null || typeof expected !== 'object' || expected instanceof ObjectId || expected instanceof Date) ? [{ [field]: expected }] : []));
+          row = { ...equalityFields(query), ...update.$setOnInsert }; rows.push(row);
+        }
         if (!row) return null;
         for (const [key, value] of Object.entries(update.$set || {})) {
           const [field, child] = key.split('.');

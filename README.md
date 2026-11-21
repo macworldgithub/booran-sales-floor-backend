@@ -1,5 +1,7 @@
 # Booran Sales Floor API
 
+The [Dealer Principal dashboard guide](docs/dealer-principal.md) covers reporting, service entries, permissions, optional DMS ingestion, formulas, stock history and administrator handover.
+
 ## Booran Appraisals and legacy archive
 
 The [inspection lifecycle extension](docs/inspection-lifecycle.md) adds internal drive checkout/return logs, unambiguous automatic trade linking, revision-protected relinking and private signed-contract records. External AI/Rego/PPSR setup is deferred; full source migration and native acceptance remain prerequisites for replacement.
