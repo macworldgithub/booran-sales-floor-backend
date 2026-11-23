@@ -1,5 +1,6 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
-const {buildReport,reportWindow,drillRows,evidence,priority}=require('../lib/crm-report');
+const {buildReport,reportWindow,drillRows,evidence,priority,active,isLeadOver60Days}=require('../lib/crm-report');
+const {isLeadOver60Days:isPolicyLeadOver60Days}=require('../lib/followup-policy');
 const now=new Date('2026-11-20T01:00:00Z'),window=reportWindow({date:'2026-11-20'},now);
 function fixture(){
  const leads=[
@@ -72,4 +73,37 @@ test('an agreed future follow-up does not create a stalled-contact alert before 
  lead.next_action.due_at='2026-11-19T00:00:00Z';
  assert.equal(priority(lead,ev,now,{}).state,'at_risk');
  assert.ok(priority(lead,ev,now,{}).reasons.some(reason=>reason.key==='followup_overdue'));
+});
+test('leads over 60 days old are marked not active and have all actions removed', () => {
+  const oldDate = new Date(+now - 65 * 86400000).toISOString();
+  const oldLead = {
+    _id: 'old-1',
+    dealership_name: 'South Morang Hyundai',
+    created_at: oldDate,
+    source: 'Internet',
+    status: 'new_lead',
+    next_action: { title: 'Old follow-up', status: 'open', due_at: oldDate }
+  };
+  const ev = evidence(oldLead, [], [], [], [], +now);
+  assert.equal(isLeadOver60Days(oldLead, ev.origin, now), true);
+  assert.equal(isPolicyLeadOver60Days(oldLead, now), true);
+  assert.equal(active(oldLead, ev.origin, now), false);
+
+  const prio = priority(oldLead, ev, now, {});
+  assert.equal(prio.state, 'inactive');
+  assert.equal(prio.reasons.length, 0);
+  assert.equal(prio.intent.length, 0);
+  assert.equal(prio.score, 0);
+  assert.equal(prio.suggestedNext, '');
+  assert.equal(prio.firstResponse.breached, false);
+  assert.equal(prio.handled, true);
+
+  const data = fixture();
+  data.leads.push(oldLead);
+  const result = buildReport(data, window, {}, now);
+  assert.equal(result.report.operations.active, 2);
+  assert.equal(drillRows(result, 'active', now).some(row => row.lead._id === 'old-1'), false);
+  assert.equal(drillRows(result, 'at_risk', now).some(row => row.lead._id === 'old-1'), false);
+  assert.equal(drillRows(result, 'overdue', now).some(row => row.lead._id === 'old-1'), false);
+  assert.equal(drillRows(result, 'inactive', now).some(row => row.lead._id === 'old-1'), true);
 });
