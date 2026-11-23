@@ -26,3 +26,21 @@ test('future work and tasks created after the selected day do not enter the diar
   assert.equal(buildDailyDiary(input({ tasks: [{ ...task, due_at: '2026-11-21T00:00:00Z' }] }), '2026-11-20').length, 0);
   assert.equal(buildDailyDiary(input({ tasks: [{ ...task, createdAt: '2026-11-21T00:00:00Z' }] }), '2026-11-20').length, 0);
 });
+test('past appointments do not carry forward into today when the prospect has next steps', () => {
+  const pastAppt = { _id: 'appt-1', leadId: 'lead', consultant_id: 'rep', type: 'Test Drive', status: 'Booked', when: '2026-11-13T04:30:00Z' };
+  // Without next steps, the past appointment carries forward as outstanding
+  const withoutNextSteps = input({ tasks: [], appointments: [pastAppt] });
+  const rowsCarried = buildDailyDiary(withoutNextSteps, '2026-11-23', new Date('2026-11-23T02:00:00Z'));
+  assert.equal(rowsCarried.length, 1);
+  assert.equal(rowsCarried[0].carriedForward, true);
+  assert.equal(rowsCarried[0].title, 'Test Drive');
+
+  // When the prospect has next steps scheduled, the past appointment does not carry forward
+  const withNextSteps = input({
+    leads: [{ ...lead, next_action: { title: 'Call to review test drive', status: 'open', due_at: '2026-11-25T01:00:00Z', recorded_at: '2026-11-14T01:00:00Z' } }],
+    tasks: [],
+    appointments: [pastAppt]
+  });
+  const rowsCleared = buildDailyDiary(withNextSteps, '2026-11-23', new Date('2026-11-23T02:00:00Z'));
+  assert.equal(rowsCleared.length, 0, 'Past appointment should not carry forward when prospect has next steps');
+});
