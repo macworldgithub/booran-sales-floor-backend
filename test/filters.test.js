@@ -60,6 +60,18 @@ test('lead status, rooftop, owner and search filters narrow the same result set'
   assert.deepEqual(ids(leads, leadQuery({ status: 'lost' })), []);
 });
 
+test('lead assignment filters isolate unassigned, connex_mark and needs_allocation leads', () => {
+  const leads = [
+    { _id: 'unassigned-lead', status: 'new_lead', owner_id: null, owner_name: 'Unassigned', source: 'Website', deal_id: 'BOORAN-1' },
+    { _id: 'connex-mark-lead', status: 'new_lead', owner_id: 'mark-id', owner_name: 'Mark Robinson', source: 'Connex', deal_id: 'CONNEX-1' },
+    { _id: 'connex-other-lead', status: 'new_lead', owner_id: 'rep-id', owner_name: 'Paul Smith', source: 'Connex', deal_id: 'CONNEX-2' },
+    { _id: 'assigned-regular', status: 'new_lead', owner_id: 'rep-id', owner_name: 'Paul Smith', source: 'Walk-in', deal_id: 'BOORAN-2' },
+  ];
+  assert.deepEqual(ids(leads, leadQuery({ assignment: 'unassigned' })), ['unassigned-lead']);
+  assert.deepEqual(ids(leads, leadQuery({ assignment: 'connex_mark' })), ['connex-mark-lead']);
+  assert.deepEqual(ids(leads, leadQuery({ assignment: 'needs_allocation' })), ['unassigned-lead', 'connex-mark-lead']);
+});
+
 test('action type, status, priority and rooftop filters honour all-status selection', () => {
   const actions = [
     { _id: 'south-open', rooftopName: 'South Morang Hyundai', actionType: 'PRICE', status: 'open', priority: 'high', vehicleTitle: 'Test EV' },
