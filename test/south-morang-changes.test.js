@@ -358,3 +358,109 @@ test('corrected sold_at moves sale out of today in dailyTraffic and dp sales, an
   const q = leadQuery({ missingContact: 'true' });
   assert.ok(q.$and.some(c => c.customer_phone?.$in?.includes('')));
 });
+
+test('DealerSocket sync retires active:false prospects, widens Nextgate name window, and auto-merges stored partials once details arrive', async () => {
+  const site = 'South Morang Hyundai';
+  const retiredId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-700001').digest('hex').slice(0, 24));
+  const storedPartialId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-700002').digest('hex').slice(0, 24));
+  const inboundPrimaryId = new ObjectId();
+  const oldNextgateId = new ObjectId();
+
+  const target = memoryDb({
+    leads: [
+      {
+        _id: retiredId,
+        deal_id: 'DEALERSOCKET-10876-700001',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Retired Prospect',
+        status: 'new_lead',
+        sms_campaign: { active: true, channel: 'SMS Campaign', snapshot_at: '2026-11-20T00:00:00.000Z' },
+        diary_entries: [],
+      },
+      {
+        _id: storedPartialId,
+        deal_id: 'DEALERSOCKET-10876-700002',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Jordan Partial',
+        customer_phone: '',
+        customer_email: '',
+        status: 'new_lead',
+        sms_campaign: { active: true, channel: 'SMS Campaign', snapshot_at: '2026-11-24T00:00:00.000Z' },
+        diary_entries: [],
+      },
+      {
+        _id: inboundPrimaryId,
+        dealership_name: site,
+        source: 'Inbound Email',
+        customer_name: 'Jordan Partial',
+        customer_phone: '+61411222333',
+        customer_email: 'jordan.partial@example.com',
+        status: 'following_up',
+        created_at: '2026-11-20T02:00:00.000Z',
+        diary_entries: [],
+      },
+      {
+        _id: oldNextgateId,
+        dealership_name: site,
+        source: 'Nextgate',
+        customer_name: 'Older Nextgate Lead',
+        customer_phone: '+61499888777',
+        status: 'following_up',
+        created_at: '2026-09-20T02:00:00.000Z',
+        diary_entries: [],
+      },
+    ],
+    integration_sync: [
+      {
+        _id: 'lead-source-filters:south morang hyundai',
+        kind: 'lead_source_filters',
+        dealership: site,
+        skipDealerSocketNextgateLeads: true,
+        skipDealerSocketWebsiteLeads: false,
+      },
+    ],
+  });
+
+  const nowIso = '2026-11-25T06:00:00.000Z';
+  const source = memoryDb({
+    south_morang_prospects: [
+      // Retired in DealerSocket -> must not stay active
+      { id: '700001', contactId: '89001', site: '10876', franchise: 'South Morang Hyundai', name: 'Retired Prospect', status: 'Unqualified', active: false, capturedAt: nowIso },
+      // Stored partial now has phone in dealerSocketSnapshot.record -> auto-merges into Inbound Email primary
+      {
+        id: '700002',
+        contactId: '89002',
+        site: '10876',
+        franchise: 'South Morang Hyundai',
+        name: 'Jordan Partial',
+        status: 'Up/Contacted',
+        active: true,
+        capturedAt: nowIso,
+        dealerSocketSnapshot: { record: { customer_phone_raw: '0411 222 333', customer_email_raw: 'jordan.partial@example.com' } },
+      },
+      // Partial DealerSocket copy of a 66-day-old Nextgate lead matched by name within 90 days -> suppressed & linked
+      { id: '700003', contactId: '89003', site: '10876', franchise: 'South Morang Hyundai', name: 'Older Nextgate Lead', status: 'Up/Contacted', active: true, capturedAt: nowIso },
+    ],
+  });
+
+  const res = await syncSmsCampaign(target, source, new Date(nowIso));
+  assert.equal(res.opportunities.status, 'fulfilled');
+
+  const leads = target.collection('leads').rows;
+  const retired = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-700001');
+  assert.equal(retired.sms_campaign.active, false);
+
+  const partial = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-700002');
+  assert.equal(partial.merged_into, String(inboundPrimaryId));
+  assert.equal(partial.sms_campaign.active, false);
+  assert.equal(partial.status, 'lost');
+
+  const inboundPrimary = leads.find(l => String(l._id) === String(inboundPrimaryId));
+  assert.ok(inboundPrimary.source_refs.some(r => r.deal_id === 'DEALERSOCKET-10876-700002'));
+
+  assert.equal(leads.some(l => l.deal_id === 'DEALERSOCKET-10876-700003'), false);
+  const nextgatePrimary = leads.find(l => String(l._id) === String(oldNextgateId));
+  assert.ok(nextgatePrimary.source_refs.some(r => r.deal_id === 'DEALERSOCKET-10876-700003'));
+});
