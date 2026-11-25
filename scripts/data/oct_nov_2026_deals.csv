@@ -1,0 +1,168 @@
+Company,First Name,Last Name,Mobile Number,Email Address,Assign to,Deal Number,Year,Make,Model,Purchase Date,Delivered Date
+,Aditi,Mody,0452 263 182,aditi.mody@hotmail.com,George Jacob,SM29121,2026,Hyundai,Hyundai Venue,2026-10-08 00:00:00,2026-10-14 00:00:00
+,Aidan,Mcnamara,0448 796 671,info@vigourelectrical.com.au,Isaac Bugeja,SM29207,2027,Hyundai,Staria,2026-10-30 00:00:00,2026-11-06 00:00:00
+,Alexandra,Mantas,0413 498 263,alexmantas@hotmail.com,Paul Daoud,SM29223,2018,Hyundai,I30,2026-11-03 00:00:00,2026-11-06 00:00:00
+,Alexandria,Cardamone,0421 976 672,Alexandria.carda@gmail.com,Khan Cetin,SM29177,2027,Hyundai,Kona,2026-10-23 00:00:00,
+,Amy,.Sneddon,0431 785 548,amysneddon@hotmail.com,Isaac Bugeja,SM29298,2027,Hyundai,Kona Ev,2026-11-21 00:00:00,
+,Anayah,Maher,0433 594 941,anayahm219@gmail.com,George Simogiannis,SM29297,2027,Hyundai,Kona Hev,2026-11-21 00:00:00,
+,Anita,Rawlinson,0404 094 666,neats_rich@yahoo.com,Paul Daoud,SM29109,2025,Hyundai,Palisade,2026-10-03 00:00:00,2026-10-17 00:00:00
+,Anita,Harris,0467 850 230,ANITAHARRIS37@GMAIL.COM,Kris Libreri,SM29228,2024,Hyundai,Kona,2026-11-05 00:00:00,
+,Anna,Scott,0402 205 521,annascott59@hotmail.com,Paul Daoud,SM29170,2026,Hyundai,Hyundai Venue,2026-10-19 00:00:00,2026-10-23 00:00:00
+,Anna,Monforte,0402 904 792,ammonforte@gmail.com,Paul Daoud,SM29299,2027,Hyundai,Kona Hev,2026-11-21 00:00:00,
+,Arlie,Jace Barwell-Chung,0430 837 848,arliejace@gmail.com,Khan Cetin,SM29271,2017,Mazda,Cx-3,2026-11-16 00:00:00,
+,Arshpreet,Kaur,0483 235 300,kaurarshpreer642@gmail.com,Fleet (AC) Manager,SM29132,2026,Hyundai,I30 Sedan,2026-11-06 00:00:00,
+,Barbara,Cumming,0405 194 986,barbaraannecumming@gmail.com,Isaac Bugeja,SM29180,2024,Toyota,Rav4,2026-10-24 00:00:00,
+,Benjamin,Freeman,0455 300 705,freemanben568@gmail.com,Isaac Bugeja,SM29216,2022,Jeep,Compass,2026-10-31 00:00:00,2026-11-07 00:00:00
+,Bradley,Andrewatha,0499 117 201,gen4coatings@bigpond.com,Quoc Truong,SM29259,2023,Mazda,Bt-50,2026-11-13 00:00:00,
+,Brittany,Brasher,0451 085 337,brittanybrasher@oulook.com,Paul Daoud,SM29162,2027,Hyundai,Kona,2026-10-16 00:00:00,2026-10-24 00:00:00
+,Bruce,Ramsdale,0423 880 236,bbear2@bigpond.com,Khan Cetin,SM29238,2022,Honda,Cr-v,2026-11-07 00:00:00,2026-11-12 00:00:00
+,Bryce,Muldrock,0439 579 446,Bryce.muldrock@fedex.com,Fleet (AC) Manager,SM29128,2026,Hyundai,Tucson Hev,2026-10-09 00:00:00,2026-10-15 00:00:00
+,Caitlan,Russell,0438 930 732,caitlan89@gmail.com,Khan Cetin,SM29174,2026,Hyundai,Santa Fe Hev,2026-10-21 00:00:00,2026-10-30 00:00:00
+,Carmelo,Pino,0424 723 386,carmelopino9@gmail.com,Nemo Mann,SM29139,2022,Hyundai,Tucson,2026-10-13 00:00:00,2026-10-15 00:00:00
+D & T Pro Painting Services Pty Ltd,Caroline,Hosking,0417 014 015,hoskingclan@bigpond.com,Isaac Bugeja,SM29212,2026,Hyundai,Santa Fe Hev,2026-10-31 00:00:00,
+,Casey,Slater,0439 853 652,caseyslater@hotmail.com,Isaac Bugeja,SM29242,2023,Toyota,Landcruiser Prado,2026-11-08 00:00:00,2026-11-16 00:00:00
+,Cathie,Young,0408 866 829,young.cathie.e@gmail.com,Paul Daoud,SM29200,2026,Hyundai,Kona Hev,2026-10-28 00:00:00,2026-10-31 00:00:00
+,Claudia,Cerni,0415 723 686,dees_davies@hotmail.com,Paul Daoud,SM29295,2021,Hyundai,I30,2026-11-20 00:00:00,
+,Colleen,Gosling,0404 296 242,colleengosling@optusnet.com.au,Isaac Bugeja,SM29159,2026,Hyundai,Tucson Hev,2026-10-15 00:00:00,2026-10-30 00:00:00
+,Con,Markos,0402 300 733,r-markos@hotmail.com,Kris Libreri,SM29135,2020,Hyundai,I30,2026-10-12 00:00:00,2026-10-15 00:00:00
+,Corin,Briggs,0411 747 204,mail@corins.com,Kris Libreri,SM29187,2026,Hyundai,Kona Hev,2026-10-26 00:00:00,2026-10-30 00:00:00
+,Cortney Renee,Claridge,0466 985 455,cortschenk@gmail.com,Khan Cetin,SM29221,2022,Subaru,Forester,2026-11-03 00:00:00,2026-11-06 00:00:00
+,Daniel,Maia,0419 967 717,d.maia@hotmail.com,Paul Daoud,SM29218,2023,Nissan,Qashqai,2026-11-02 00:00:00,2026-11-06 00:00:00
+,Daryl,Steffen,0409 424 704,info@steffen.com.au,Khan Cetin,SM29286,2026,Hyundai,Hyundai Venue,2026-11-18 00:00:00,
+,David,Moshi,0402 774 227,davidmessi17@gmail.com,George Simogiannis,SM29117,2024,Subaru,Brz,2026-10-15 00:00:00,
+,David,Peterson,0409 199 624,maureenpet58@gmail.com,Fleet (AC) Manager,SM29147,2026,Hyundai,Tucson Hev,2026-10-14 00:00:00,2026-11-13 00:00:00
+,Deborah,Brown,0403 906 519,debbiebrown69@bigpond.com,Paul Daoud,SM29175,2026,Hyundai,Kona,2026-10-23 00:00:00,2026-10-27 00:00:00
+,Dennis,Hempenstall,0468 940 092,hempenstallangela@gmail.com,George Jacob,SM29201,2027,Hyundai,Kona Hev,2026-10-29 00:00:00,2026-11-05 00:00:00
+,Elaine,Scott,0438 392 629,ms.elaine.scott@gmail.com,Paul Daoud,SM29303,2024,Hyundai,Venue,2026-11-24 00:00:00,
+,Elysia,Acosta,0488 059 199,elysia_acosta@hotmail.com,Khan Cetin,SM29086,2027,Hyundai,Kona,2026-11-24 00:00:00,
+,Erica,Baylis,0422 093 117,deandea15@yahoo.com.au,Isaac Bugeja,SM29171,2026,Hyundai,Kona,2026-10-19 00:00:00,2026-10-29 00:00:00
+,Faye,Capp,0408 665 335,fayecapp@gmail.com,Paul Daoud,SM29173,2027,Hyundai,Kona Hev,2026-10-20 00:00:00,2026-10-30 00:00:00
+Stepping Stones Child Care Services Pty Ltd,Fowzia,Issa,0432 119 430,fowzia_issa@hotmail.com,Paul Daoud,SM29131,2026,Hyundai,I30 Sedan Hev,2026-10-10 00:00:00,2026-10-13 00:00:00
+,Gaye,Kimberley,0414 415 128,bgkimberley987@gmail.com,Paul Daoud,SM29248,2027,Hyundai,Kona Hev,2026-11-10 00:00:00,2026-11-16 00:00:00
+Diamond Service Solutions,Geoff,Green,,geooff@diamondservicesolutions.com.au,George Simogiannis,SM29287,2026,Hyundai,Staria,2026-11-18 00:00:00,
+W & L Property Maintance,George,Wanick,0411 720 488,warrick.wag@bigpond.com,George Simogiannis,SM29137,2027,Hyundai,Staria,2026-10-13 00:00:00,
+,Gerry,Katiforis,0400 579 556,Gaatiforis74@gmail.com;gsf2j7tjxh@privaterelay.appleid.com,Kris Libreri,SM29241,2026,Hyundai,Santa Fe Hev,2026-11-07 00:00:00,
+,Hamin,Vahora,0449 539 101,haminv1995@gmail.com,Isaac Bugeja,SM29274,2023,Kia,Sorento,2026-11-17 00:00:00,
+,Harley,Harris,0476 198 322,Hharris@live.com.au,George Simogiannis,SM29176,2022,Mitsubishi,Triton,2026-10-23 00:00:00,2026-11-10 00:00:00
+,Hassan,Samie,0415 949 307,Hass.samie@gmail.com,Khan Cetin,SM29292,2018,Mazda,3,2026-11-19 00:00:00,
+,Heng,Peng,0405 390 714,17630910714@163.com,George Simogiannis,SM29272,2017,Mazda,Cx-5,2026-11-16 00:00:00,2026-11-20 00:00:00
+Holly's Dust And More Cleaning Services,holly,,,holly25k@hotmail.com,Isaac Bugeja,SM29233,2026,Hyundai,Tucson Hev,2026-11-06 00:00:00,
+,Ian,Brownnutt,0481 997 188,ianwbrown106@icloud.com,George Jacob,SM29120,2026,Hyundai,Hyundai Venue,2026-10-08 00:00:00,2026-10-15 00:00:00
+,Ian,Millman,0449 149 908,imillman626@gmail.com,Isaac Bugeja,SM29133,2026,Hyundai,Tucson Hev,2026-10-10 00:00:00,2026-10-16 00:00:00
+,Jason,Rostami,0456 217 614,Jasonrostami@yahoo.com,Paul Daoud,SM29301,2024,Ford,Ranger,2026-11-23 00:00:00,
+,Jason,Ziino,0439 353 783,jammusic@bigpond.com,Fleet (AC) Manager,SM29305,2026,Hyundai,Kona Ev,2026-11-25 00:00:00,
+,Jennifer,Cochrane,0415 488 297,cochranejenny@hotmail.com,Kris Libreri,SM29105,2026,Hyundai,Palisade,2026-10-02 00:00:00,2026-10-07 00:00:00
+,Jiaraphan,Gavin,0449 675 300,jiaraphangavin@icloud.com;kbgavin@bigpond.net.au,Paul Daoud,SM29163,2024,Hyundai,Venue,2026-10-17 00:00:00,2026-10-21 00:00:00
+,Joelan,Hansen,0423 114 371,joelan.hansen@gmail.com;joelan.hansen@rea-group.com,Fleet (AC) Manager,SM29224,2027,Hyundai,Kona Hev,2026-11-04 00:00:00,2026-11-16 00:00:00
+,John,Cuschieri,0490 316 877,jcuschieri77@gmail.com,Khan Cetin,SM29219,2022,Kia,Cerato,2026-11-02 00:00:00,2026-11-06 00:00:00
+,Joseph,Fieschi,0431 282 133,josephfieschi967@hotmail.com,George Jacob,SM29165,2026,Hyundai,Tucson Hev,2026-10-17 00:00:00,2026-10-21 00:00:00
+,Juliet,Floramo,0481 088 925,Julietfloramo@gmail.com,Khan Cetin,SM29262,2027,Hyundai,Kona Hev,2026-11-14 00:00:00,2026-11-18 00:00:00
+,Katherine,Mc Kenzie,0481 241 837,christinebryce.cm@gmail.com,Isaac Bugeja,SM29291,2018,Mitsubishi,Eclipse Cross,2026-11-19 00:00:00,
+,Katica,Yarevska,0412 136 552,karolyarra67@gmail.com,George Simogiannis,SM29172,2022,Honda,Cr-v,2026-10-28 00:00:00,
+,Khan,Imtiaz,0426 600 710,emtiyaazkhan43@gmail.com,Isaac Bugeja,SM29145,2021,Toyota,Kluger,2026-10-13 00:00:00,
+,Kiri,Balasso,0400 213 555,kiri_balasso@hotmail.com,Khan Cetin,SM29234,2026,Hyundai,Tucson Hev,2026-11-06 00:00:00,2026-11-20 00:00:00
+,Kylie,Hammon,0411 469 445,kyliem.hammon@gmail.com,Paul Daoud,SM29106,2026,Hyundai,Kona Hev,2026-10-02 00:00:00,2026-10-14 00:00:00
+,Kylie,Garlick,0422 654 003,kylieag@optusnet.com.au,Kris Libreri,SM29226,2022,Hyundai,Tucson,2026-11-05 00:00:00,2026-11-11 00:00:00
+M&B Hope Enterprise PTY LTD,Laura,.,0411 855 084,drbassem.dawood@gmail.com,Kris Libreri,SM29300,2027,Hyundai,Kona Hev,2026-11-23 00:00:00,
+,Lauren,Fung,0468 794 496,laurenfung5@gmail.com,Khan Cetin,SM29275,2023,Hyundai,I30,2026-11-17 00:00:00,
+,Lee,Gilchrist,0402 344 934,michelle.gilchrist2@bigpond.com,George Simogiannis,SM29261,2026,Hyundai,I30,2026-11-14 00:00:00,2026-11-21 00:00:00
+,Leo,Pedersen,0472 502 726,leoped76@icloud.com,Khan Cetin,SM29260,2020,Hyundai,I30,2026-11-14 00:00:00,2026-11-21 00:00:00
+Worldtek PTY LTD,Leonardo Micheal,Vignone,0493 889 548,leovignone@gmail.com;leovigone@gmail.com,Khan Cetin,SM29098,2027,Hyundai,Santa Fe Hev,2026-10-05 00:00:00,
+,Lephterry,Lagoulis,0413 958 516,15hayston@gmail.com,Isaac Bugeja,SM29289,2024,Hyundai,Tucson,2026-11-19 00:00:00,
+,Liam,Griffiths,0404 870 884,successatlast100@hotmail.com,Khan Cetin,SM29129,2023,Hyundai,Tucson,2026-10-09 00:00:00,2026-10-21 00:00:00
+,Liberty,Fletcher,0404 222 046,LIBERTY_BELL1987@HOTMAIL.COM;liberty_fletcher-seales@hotmail.com,Kris Libreri,SM29213,2026,Hyundai,Tucson Hev,2026-10-31 00:00:00,2026-11-23 00:00:00
+,Lisa,Chambers,0425 847 972,LISACHAMBERS1990@YAHOO.COM.AU,Khan Cetin,SM28708,2026,Hyundai,Hyundai Venue,2026-10-28 00:00:00,2026-10-31 00:00:00
+,Louis,Dupont,0412 206 979,dupontjosh59@gmail.com,Khan Cetin,SM29110,2023,Hyundai,Santa Fe,2026-10-03 00:00:00,2026-10-07 00:00:00
+,Louise,Kirby,0415 845 872,lou.c.kirby@gmail.com,Khan Cetin,SM29164,2024,Hyundai,Santa Fe,2026-10-17 00:00:00,2026-10-22 00:00:00
+,Madison,Reaby,0401 489 455,madisonreaby@hotmail.com,Quoc Truong,SM29107,2026,Hyundai,Tucson Hev,2026-10-03 00:00:00,2026-10-21 00:00:00
+,Magdalini,Kamaris,0419 555 055,margaret.kamaris@icloud.com,George Simogiannis,SM29229,2013,Mazda,6,2026-11-05 00:00:00,2026-11-10 00:00:00
+,Mary,Newnham,0411 268 360,ashtray.smhyun@qv56akcc6p.mail.ashtray.fun,Kris Libreri,SM28345,2027,Hyundai,Inster,2026-10-23 00:00:00,2026-10-27 00:00:00
+,Maryam,Belal,0479 140 650,maryam5555b@gmail.com,Isaac Bugeja,SM29247,2026,Hyundai,I30 Sedan Hev,2026-11-09 00:00:00,2026-11-13 00:00:00
+,Mateus,De Barros Viana,0420 758 030,maviba78@hotmail.com,Khan Cetin,SM29211,2021,Mazda,Cx-30,2026-10-31 00:00:00,2026-11-14 00:00:00
+,Matthew,Kurek,0488 750 319,mattykurek@gmail.com,Kris Libreri,SM29157,2022,Volkswagen,Multivan,2026-10-15 00:00:00,2026-10-20 00:00:00
+,Michael,Jamieson,0439 355 298,mickeyjamo@gmail.com,Kris Libreri,SM29257,2021,Mitsubishi,Pajero Sport,2026-11-11 00:00:00,2026-11-14 00:00:00
+,Monika,Kastrup,0412 118 432,skyroamer50@gmail.com,Khan Cetin,SM29302,2024,Mitsubishi,Asx,2026-11-23 00:00:00,
+,Myah,Demarco,0476 305 708,ian.anna@hotmail.com;myahdemarco994@gmail.com,Kris Libreri,SM29179,2017,Subaru,Impreza,2026-10-24 00:00:00,2026-10-28 00:00:00
+,Naomi,Locking,0448 393 336,lockingn@gmail.com,George Simogiannis,SM29167,2025,Chery,Tiggo 4,2026-10-17 00:00:00,2026-10-23 00:00:00
+,Naomi,Guerrera,0450 998 737,naomiguerrera@protonmail.com,Khan Cetin,SM29181,2027,Hyundai,Kona,2026-10-24 00:00:00,2026-11-02 00:00:00
+,Naomi,Murphy,0400 692 992,naomimurphy@hotmail.com,Khan Cetin,SM29296,2027,Hyundai,Kona Hev,2026-11-21 00:00:00,
+,Nathan,Miloshis,0422 712 542,n.miloshis@gmail.com,George Jacob,SM29130,2019,Toyota,Rav4,2026-10-10 00:00:00,2026-10-16 00:00:00
+,Navpreet,Kaur,0490 342 893,sheenusokhal111@gmail.com,George Jacob,SM29119,2026,Hyundai,Kona Hev,2026-10-07 00:00:00,
+,Neil,Chambers,0435 034 663,neil.chamber@gmail.com,Isaac Bugeja,SM29138,2026,Hyundai,Kona Hev,2026-10-12 00:00:00,2026-10-28 00:00:00
+,Nuray,Berent,0410 779 663,lumanovski98@gmail.com,Isaac Bugeja,SM29236,2022,Gwm,Haval Jolion,2026-11-06 00:00:00,2026-11-12 00:00:00
+,Pathirage,Perera,0414 676 423,pubudustc@gmail.com,Nemo Mann,SM29116,2026,Hyundai,Kona Hev,2026-10-06 00:00:00,
+,Pathirage,Perera,0414 676 423,pubudustc@gmail.com,Nemo Mann,SM29136,2027,Hyundai,Kona Hev,2026-10-12 00:00:00,2026-10-15 00:00:00
+,Paul,Kachappily,0432 475 707,kachappilys@gmail.com,Fleet (AC) Manager,SM29146,2026,Hyundai,Santa Fe Hev,2026-10-14 00:00:00,
+,Paul,Dyer,0431 947 549,padyer1@gmail.com,George Jacob,SM29182,2020,Hyundai,Kona,2026-10-24 00:00:00,2026-10-30 00:00:00
+,Paul,Kotsopoulos,0448 783 166,paulbmw327@gmail.com,Khan Cetin,SM29194,2019,Hyundai,I30,2026-10-27 00:00:00,2026-10-30 00:00:00
+,Paula,Symeonides,0402 010 974,paula.symon@yahoo.com,George Simogiannis,SM29205,2018,Suzuki,Baleno,2026-10-30 00:00:00,2026-11-10 00:00:00
+,Pauline,Issa,0404 493 275,paulaissa@outlook.com.au,Isaac Bugeja,SM29237,2021,Nissan,X-trail,2026-11-06 00:00:00,2026-11-13 00:00:00
+,Pek,Lim,0416 517 806,petternelly57@hotmail.com,Isaac Bugeja,SM29188,2026,Hyundai,Santa Fe Hev,2026-10-29 00:00:00,2026-11-02 00:00:00
+,Pembe,Avan,0421 890 947,pembe.avan71@gmail.com,Paul Daoud,SM29264,2027,Hyundai,Kona Hev,2026-11-14 00:00:00,2026-11-19 00:00:00
+,Porsha,Hung,0450 092 903,porsha.hung3@gmail.com,Khan Cetin,SM29239,2027,Hyundai,Kona Hev,2026-11-07 00:00:00,2026-11-13 00:00:00
+,Rachel,Mccarthy,0448 887 554,rachelwilson_33@yahoo.com,Khan Cetin,SM29222,2027,Hyundai,Kona,2026-11-03 00:00:00,
+The Trustee for BABA DEEP SINGH TRUST,Randeep,Singh,0411 439 405,sonusaini013@gmail.com,Khan Cetin,SM29294,2020,Toyota,Camry,2026-11-20 00:00:00,
+,Rauth,Patrice,0423 248 694,rauthpatrice669@gmail.com,George Jacob,SM29156,2020,Hyundai,Kona,2026-10-14 00:00:00,
+Revive Healthcare Pty Ltd,Revive Healthcare Pty Ltd,Anu,0450 256 741,arunmk06@gmail.com,George Jacob,SM29112,2026,Hyundai,Palisade,2026-10-03 00:00:00,2026-10-08 00:00:00
+,Robert,Leo,0402 831 497,rob.leo1@bigpond.com,Kris Libreri,SM29220,2019,Nissan,X-trail,2026-11-02 00:00:00,2026-11-06 00:00:00
+,Robin,Trickett,0421 127 937,ROBTRI@MELBPC.ORG.AU,Khan Cetin,SM29263,2024,Hyundai,Kona,2026-11-14 00:00:00,2026-11-21 00:00:00
+,Rosaline,Jayasuriya,0499 092 768,merrillandroseline@yahoo.com.au,Kris Libreri,SM29249,2024,Hyundai,Venue,2026-11-10 00:00:00,2026-11-16 00:00:00
+,Rosie,Andrea,0432 396 282,mattandlane@gmail.com,Paul Daoud,SM29256,2024,Hyundai,Tucson,2026-11-11 00:00:00,
+,Ryan,Taylor,0466 823 690,rytay45@gmail.com,Fleet (AC) Manager,SM29206,2026,Hyundai,Santa Fe Hev,2026-11-16 00:00:00,
+,Sam,Hammington,0412 256 727,sam.hammington@gmail.com,George Simogiannis,SM29270,2027,Hyundai,Santa Fe Hev,2026-11-16 00:00:00,
+,Samuel,Patrecca,0413 400 319,,Nemo Mann,SM29118,2015,Kia,Sportage,2026-10-07 00:00:00,2026-10-14 00:00:00
+,Sanjaya,Parajuli,0403 894 970,sanjayap67@gmail.com,Isaac Bugeja,SM29210,2026,Hyundai,Tucson Hev,2026-10-30 00:00:00,2026-11-16 00:00:00
+,Scott,Dent,0402 181 245,scottdent924@gmail.com,Nemo Mann,SM29150,2026,Hyundai,Tucson,2026-10-14 00:00:00,2026-10-17 00:00:00
+,Shaedyn,Folau,0452 055 557,irayma.r@vehiclesdirect.com.au,Paul Daoud,SM29225,2023,Gwm,Haval H6,2026-11-04 00:00:00,2026-11-20 00:00:00
+,Shane,Mitchell,0403 293 708,shanemitchell236@gmail.com,Khan Cetin,SM29196,2017,Holden,Commodore,2026-10-27 00:00:00,2026-11-07 00:00:00
+,Shelby,Martin,0490 691 559,shelby.martin91@hotmail.com,George Simogiannis,SM29246,2026,Hyundai,Santa Fe Hev,2026-11-09 00:00:00,
+,Stephen,Ramadge,0419 387 882,ramma7@live.com,George Jacob,SM29166,2026,Hyundai,Tucson Hev,2026-10-17 00:00:00,2026-10-22 00:00:00
+,Sue,Ellis,0412 927 328,sellis7822@gmail.com,Fleet (AC) Manager,SM29244,2027,Hyundai,Kona,2026-11-09 00:00:00,2026-11-17 00:00:00
+,Suzanne,Crawford,0414 394 417,suecrawford@outlook.com.au,Paul Daoud,SM29160,2026,Hyundai,Tucson Hev,2026-10-16 00:00:00,2026-10-24 00:00:00
+,Tanika,Cooper,0401 555 440,tanikacooper418@gmail.com,Khan Cetin,SM29108,2024,Mitsubishi,Outlander,2026-10-03 00:00:00,2026-10-05 00:00:00
+,Tanner,Roussety,0481 757 637,tanner06_@outlook.com,Paul Daoud,SM29240,2026,Hyundai,I30 Sedan Hev,2026-11-07 00:00:00,2026-11-18 00:00:00
+,Tayla,Capuano,0411 125 373,taylarosedoyle@gmail.com,Khan Cetin,SM29304,2022,Ldv,D90,2026-11-24 00:00:00,
+,Thomas,Roberts,0492 286 840,thomas.w.roberts03@gmail.com,Khan Cetin,SM29209,2024,Subaru,Brz,2026-10-30 00:00:00,2026-11-21 00:00:00
+,Thomas,O'connor,0435 333 040,CRISOCON@BIGPOND.COM,Kris Libreri,SM29214,2027,Hyundai,Kona Hev,2026-10-31 00:00:00,2026-11-06 00:00:00
+,Thomas,Farrugia,0401 373 311,LZF.INC_@HOTMAIL.COM,Paul Daoud,SM29215,2019,Toyota,Camry,2026-10-31 00:00:00,2026-11-07 00:00:00
+,Thomas,Raybould,0432 324 907,raybould_tom@hotmail.com,Isaac Bugeja,SM29227,2022,Mg,Mg3,2026-11-05 00:00:00,2026-11-10 00:00:00
+B,Timothy,Mac Manus,0413 311 205,tkmacmanus@gmail.com,Khan Cetin,SM29199,2027,Hyundai,Palisade,2026-11-11 00:00:00,2026-11-18 00:00:00
+,Travis,Batchelder,0418 571 516,travisandkatiebatchelder@gmail.com,Isaac Bugeja,SM29265,2026,Hyundai,Tucson Hev,2026-11-14 00:00:00,2026-11-20 00:00:00
+,Trent,Frydas,0432 424 501,trent_00095@hotmail.com,Khan Cetin,SM29290,2026,Hyundai,Tucson Hev,2026-11-19 00:00:00,
+,Vanessa,Koulaxizellis,0430 766 889,sagulovanessa@gmail.com,Kris Libreri,SM29111,2026,Hyundai,Tucson Hev,2026-10-03 00:00:00,2026-11-18 00:00:00
+,Vanessa,March,0418 561 220,ness.jk2@gmail.com,Isaac Bugeja,SM29245,2021,Hyundai,Venue,2026-11-09 00:00:00,2026-11-12 00:00:00
+,Vasko,Petlevski,0417 556 115,vajsel@outlook.com,Nemo Mann,SM29158,2026,Hyundai,I30 Sedan Hev,2026-10-15 00:00:00,2026-10-28 00:00:00
+,Wun,Ho,0403 983 330,hermitsquid@gmail.com,Kris Libreri,SM29266,2026,Hyundai,Tucson Hev,2026-11-14 00:00:00,
+Care Beyond Disability Service Solutions Pty Ltd,zhuoping,BONNICI,,apcobobo@hotmail.com,Khan Cetin,SM29258,2026,Hyundai,Tucson Hev,2026-11-12 00:00:00,
+,Zoran,Talevski,0424 235 924,jessica.talevska@gmail.com,George Simogiannis,SM29217,2027,Hyundai,Kona,2026-11-02 00:00:00,
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29113,2026,Hyundai,Tucson Hev,2026-10-05 00:00:00,2026-10-06 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29114,2026,Hyundai,Tucson Hev,2026-10-05 00:00:00,2026-10-06 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29115,2026,Hyundai,Tucson Hev,2026-10-05 00:00:00,2026-10-06 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29148,2026,Hyundai,Tucson Hev,2026-10-14 00:00:00,2026-10-16 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29149,2026,Hyundai,Tucson Hev,2026-10-14 00:00:00,2026-10-16 00:00:00
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29151,2027,Hyundai,Kona,2026-10-14 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29152,2027,Hyundai,Kona,2026-10-14 00:00:00,2026-11-02 00:00:00
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29153,2027,Hyundai,Kona,2026-10-14 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29154,2027,Hyundai,Kona,2026-10-14 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29155,2027,Hyundai,Kona,2026-10-14 00:00:00,
+Livio Delbusso,,,,livio.delbusso@zinfra.com.au,Isaac Bugeja,SM29161,2026,Hyundai,Tucson Hev,2026-10-16 00:00:00,2026-11-06 00:00:00
+EYES14 PTY LTD,,,,info@pro-finishscreeding.com,Isaac Bugeja,SM29178,2027,Hyundai,Staria,2026-10-23 00:00:00,2026-10-30 00:00:00
+VIVIDALE PTY LTD,,,03 9878 6400,paul.dubimir@outlook.com,Anthony Calderone,SM29183,2026,Hyundai,Tucson Hev,2026-10-26 00:00:00,2026-10-27 00:00:00
+VIVIDALE PTY LTD,,,03 9878 6400,paul.dubimir@outlook.com,Anthony Calderone,SM29184,2026,Hyundai,Tucson Hev,2026-10-26 00:00:00,2026-10-28 00:00:00
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29189,2026,Hyundai,Tucson,2026-10-27 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29190,2026,Hyundai,Tucson,2026-10-27 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29191,2026,Hyundai,Tucson,2026-10-27 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29192,2026,Hyundai,Tucson,2026-10-27 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29193,2026,Hyundai,Tucson,2026-10-27 00:00:00,
+VIVIDALE PTY LTD,,,03 9878 6400,paul.dubimir@outlook.com,Anthony Calderone,SM29197,2026,Hyundai,Tucson Hev,2026-10-28 00:00:00,2026-10-30 00:00:00
+VIVIDALE PTY LTD,,,03 9878 6400,paul.dubimir@outlook.com,Anthony Calderone,SM29198,2026,Hyundai,Tucson Hev,2026-10-28 00:00:00,2026-10-30 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29230,2026,Hyundai,Tucson Hev,2026-11-06 00:00:00,2026-11-10 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29231,2026,Hyundai,Tucson Hev,2026-11-06 00:00:00,2026-11-10 00:00:00
+Parismatch Pty Ltd,,,03 9478 6511,avispreston@hotmail.com,Anthony Calderone,SM29232,2026,Hyundai,Tucson Hev,2026-11-06 00:00:00,2026-11-10 00:00:00
+Dept of Families Fairness & Housing,,,,fleetservices@dffh.vic.gov.au,Fleet (AC) Manager,SM29250,2026,Hyundai,Santa Fe Hev,2026-11-11 00:00:00,
+Dept of Families Fairness & Housing,,,,fleetservices@dffh.vic.gov.au,Fleet (AC) Manager,SM29251,2026,Hyundai,Santa Fe Hev,2026-11-11 00:00:00,
+Dept of Families Fairness & Housing,,,,fleetservices@dffh.vic.gov.au,Fleet (AC) Manager,SM29252,2026,Hyundai,Tucson Hev,2026-11-11 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29267,2027,Hyundai,Kona,2026-11-16 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29268,2027,Hyundai,Kona,2026-11-16 00:00:00,
+Cla Trading Pty Ltd,,,,ecau-defleetadmin-ul@europcar.com,Anthony Calderone,SM29269,2027,Hyundai,Kona,2026-11-16 00:00:00,
+Anthony Magnanini,,,0490 807 871,tjmag@optusnet.com.au,Khan Cetin,SM29288,2027,Hyundai,Kona Hev,2026-11-19 00:00:00,

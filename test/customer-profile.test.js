@@ -11,6 +11,7 @@ function readField(row, path) {
 }
 
 function equalVal(a, b) {
+  if (b === null || a === null) return a == b;
   return a instanceof ObjectId || b instanceof ObjectId ? String(a) === String(b) : a === b;
 }
 
@@ -300,3 +301,132 @@ test('Business many-to-many endpoints support attaching, primary toggle, adding 
   const foreignRes = await req(`/leads/${foreignId}/business`);
   assert.equal(foreignRes.status, 404);
 });
+
+test('merge carries assignee & status when primary is unassigned and retains alternate phones & emails', async t => {
+  const { req, records, manager, site } = await setupApi(t);
+  const primaryId = new ObjectId();
+  const secondaryId = new ObjectId();
+
+  // Primary is unassigned new_lead with primary mobile + primary email
+  records.leads.push({
+    _id: primaryId,
+    customer_name: 'Merge Test Customer',
+    customer_phone: '+61411111111',
+    customer_email: 'primary@example.test',
+    dealership_name: site,
+    status: 'new_lead',
+    owner_id: null,
+    owner_name: 'Unassigned',
+    created_at: '2026-11-01T00:00:00Z',
+  });
+
+  // Secondary is assigned to manager and marked sold, with different mobile & email
+  records.leads.push({
+    _id: secondaryId,
+    customer_name: 'Merge Test Customer',
+    customer_phone: '+61422222222',
+    customer_email: 'secondary@example.test',
+    dealership_name: site,
+    status: 'sold',
+    sold_at: '2026-11-10T02:00:00.000Z',
+    delivery_date: '2026-11-14T02:00:00.000Z',
+    deal_number: 'SM29999',
+    owner_id: String(manager._id),
+    owner_name: manager.name,
+    assigned_at: '2026-11-05T00:00:00Z',
+    created_at: '2026-11-02T00:00:00Z',
+  });
+
+  records.sales_tasks = [
+    { _id: new ObjectId(), dealership: site, lead_id: String(primaryId), status: 'open', assignee_id: null, assignee_name: 'Unassigned' },
+  ];
+
+  const merged = await req(`/leads/${primaryId}/merge`, {
+    method: 'POST',
+    body: JSON.stringify({ duplicateId: String(secondaryId), confirmSameCustomer: true }),
+  });
+  assert.equal(merged.status, 200, merged.body.error);
+
+  const data = merged.body.data;
+  assert.equal(data.owner_id, String(manager._id), 'Assignee carries across when primary is unassigned');
+  assert.equal(data.owner_name, manager.name);
+  assert.equal(data.status, 'sold', 'Status carries across when primary is unassigned');
+  assert.equal(data.deal_number, 'SM29999');
+  assert.deepEqual(data.alternate_phones, ['+61422222222'], 'Secondary mobile retained as additional phone');
+  assert.deepEqual(data.alternate_emails, ['secondary@example.test'], 'Secondary email retained as additional email');
+  assert.equal(records.sales_tasks[0].assignee_id, String(manager._id), 'Open work transfers to carried owner');
+
+  // Search by alternate email finds the merged primary lead
+  const searchByAltEmail = await req('/leads?search=secondary@example.test');
+  assert.equal(searchByAltEmail.status, 200);
+  assert.deepEqual(searchByAltEmail.body.data.map(r => r.id), [String(primaryId)]);
+});
+
+test('oct-nov 2026 deals import parses CSV, groups fleet/multi-vehicle buyers, maps staff and stays idempotent', async () => {
+  const { runImport } = require('../scripts/import-oct-nov-deals');
+  const existingLeadId = new ObjectId();
+  const records = {
+    users: [
+      { _id: new ObjectId(), name: 'Kris Liberi', active: true },
+      { _id: new ObjectId(), name: 'Anthony C', active: true },
+      { _id: new ObjectId(), name: 'George Jacob', active: false },
+      { _id: new ObjectId(), name: 'Khan Cetin', active: true },
+      { _id: new ObjectId(), name: 'Isaac Bugeja', active: true },
+      { _id: new ObjectId(), name: 'Paul Daoud', active: true },
+      { _id: new ObjectId(), name: 'George Simogiannis', active: true },
+      { _id: new ObjectId(), name: 'Quoc Truong', active: true },
+    ],
+    leads: [
+      {
+        _id: existingLeadId,
+        dealership_name: 'South Morang Hyundai',
+        customer_name: 'Aditi Mody',
+        customer_phone: '+61452263182',
+        customer_email: 'aditi.mody@hotmail.com',
+        status: 'following_up',
+        owner_id: null,
+        owner_name: 'Unassigned',
+        booran_edited_fields: [],
+      },
+    ],
+    deals: [],
+    businesses: [],
+    customer_businesses: [],
+  };
+  const db = fixtureDb(records);
+  const dry = await runImport(db, { apply: false });
+  assert.equal(dry.totalCsvRows, 167);
+  assert.equal(dry.dealsUpserted, 167);
+  assert.equal(records.deals.length, 0);
+
+  const applied = await runImport(db, { apply: true });
+  assert.equal(applied.dealsUpserted, 167);
+  assert.equal(records.deals.length, 167);
+
+  // Aditi Mody updated in-place to sold with exact dates & deal number
+  const aditi = records.leads.find(l => l._id.equals(existingLeadId));
+  assert.equal(aditi.status, 'sold');
+  assert.equal(aditi.deal_number, 'SM29121');
+  assert.equal(aditi.sold_at, '2026-10-08T02:00:00.000Z');
+  assert.equal(aditi.delivery_date, '2026-10-14T02:00:00.000Z');
+
+  // Parismatch Pty Ltd grouped into 1 lead + 1 business + 8 deals assigned to Anthony C
+  const parismatchDeals = records.deals.filter(d => d.business_name === 'Parismatch Pty Ltd');
+  assert.equal(parismatchDeals.length, 8);
+  assert.equal(parismatchDeals[0].owner_name, 'Anthony C');
+
+  // Pathirage Perera grouped into 1 lead + 2 deals
+  const pathirageLead = records.leads.find(l => l.customer_name === 'Pathirage Perera');
+  assert.ok(pathirageLead);
+  const pathirageDeals = records.deals.filter(d => d.lead_id === String(pathirageLead._id));
+  assert.equal(pathirageDeals.length, 2);
+  assert.equal(pathirageLead.deal_number, 'SM29136');
+
+  // Re-running import is completely idempotent (no duplicate leads or deals)
+  const leadCountAfterFirst = records.leads.length;
+  await runImport(db, { apply: true });
+  assert.equal(records.leads.length, leadCountAfterFirst);
+  assert.equal(records.deals.length, 167);
+});
+
+
