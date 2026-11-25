@@ -938,9 +938,7 @@ if (!process.env.VERCEL) {
           try {
             const target = await database('MONGODB_URI_FLWUP', 'imports');
             const source = await resolveSmsCampaignDatabase(target, database);
-            const result = await syncSmsCampaign(target, source, new Date(), {
-              syncDealerSocket: process.env.DEALERSOCKET_SYNC_ENABLED === 'true',
-            });
+            const result = await syncSmsCampaign(target, source);
             for (const [source, outcome] of Object.entries(result)) {
               if (outcome.status === 'rejected') console.warn(`SMS Campaign ${source} sync failed.`);
             }
