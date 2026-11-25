@@ -2962,3 +2962,98 @@ test('managers can correct sold dates, configure lost SMS and source filters, ap
   assert.equal(third.status, 'sold');
   assert.equal(third.sold_at, '2026-10-30T02:00:00.000Z');
 });
+
+test('sold transitions supersede pending loss reviews and exclude sold leads from manager queues', async (t) => {
+  const { request, records, user } = await api(t);
+  const site = records.leads[0].dealership_name;
+
+  // 1. Legacy already-sold lead with stale pending loss_review (e.g. SM29304 scenario)
+  const staleSold = records.leads[0];
+  Object.assign(staleSold, {
+    status: 'sold',
+    sold_at: '2026-11-24T02:00:00.000Z',
+    deal_number: 'SM29304',
+    owner_id: String(user._id),
+    owner_name: user.name,
+    loss_review: { id: 'stale-loss-1', status: 'pending', reason: 'deal', requested_by: String(user._id), requested_name: user.name, requested_at: '2026-11-25T23:14:17.386Z' },
+  });
+  records.sales_tasks = [{ _id: new ObjectId(), lead_id: String(staleSold._id), dealership: site, status: 'awaiting_approval', review_id: 'stale-loss-1' }];
+
+  // Excluded from manager-approvals, daily-oversight pendingLosses, and daily-traffic priorities
+  const approvals = await request(`/manager-approvals?rooftop=${encodeURIComponent(site)}`);
+  assert.equal(approvals.status, 200);
+  assert.equal(approvals.body.data.requests.some(r => String(r.lead._id) === String(staleSold._id)), false);
+
+  const oversight = await request(`/daily-oversight?rooftop=${encodeURIComponent(site)}`);
+  assert.equal(oversight.status, 200);
+  assert.equal(oversight.body.data.losses.some(l => String(l._id) === String(staleSold._id)), false);
+  assert.equal(oversight.body.data.summary.pendingLosses, 0);
+
+  const traffic = await request(`/daily-traffic?rooftop=${encodeURIComponent(site)}`);
+  assert.equal(traffic.status, 200);
+  assert.equal(traffic.body.data.priorities.approvals.loss, 0);
+
+  // Attempting to approve loss on an already-sold lead is blocked with guidance; returning clears stale loss without losing Sold status
+  const approveSold = await request(`/leads/${staleSold._id}/loss-review`, {
+    method: 'POST',
+    body: JSON.stringify({ reviewId: 'stale-loss-1', action: 'approve', notes: 'Should not lose sale' }),
+  });
+  assert.equal(approveSold.status, 409);
+  assert.equal(staleSold.status, 'sold');
+
+  const clearSold = await request(`/leads/${staleSold._id}/loss-review`, {
+    method: 'POST',
+    body: JSON.stringify({ reviewId: 'stale-loss-1', action: 'return', notes: 'Return to Khan - Deal Done' }),
+  });
+  assert.equal(clearSold.status, 200, clearSold.body.error);
+  assert.equal(clearSold.body.data.status, 'sold');
+  assert.equal(clearSold.body.data.loss_review.status, 'cancelled');
+  assert.equal(records.sales_tasks[0].status, 'completed');
+
+  // 2. PATCH /leads/:id setting status='sold' auto-clears pending loss_review
+  const second = records.leads[1];
+  Object.assign(second, {
+    dealership_name: site,
+    status: 'following_up',
+    owner_id: String(user._id),
+    owner_name: user.name,
+    loss_review: { id: 'pending-loss-2', status: 'pending', reason: 'No response', requested_by: String(user._id), requested_name: user.name, requested_at: new Date().toISOString() },
+  });
+  const markSold = await request(`/leads/${second._id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'sold' }),
+  });
+  assert.equal(markSold.status, 200, markSold.body.error);
+  assert.equal(markSold.body.data.status, 'sold');
+  assert.equal(markSold.body.data.loss_review.status, 'cancelled');
+
+  // 3. Completing a deal (PATCH /deals/:id/status) auto-clears pending loss_review
+  const third = records.leads[2];
+  Object.assign(third, {
+    dealership_name: site,
+    status: 'following_up',
+    owner_id: String(user._id),
+    owner_name: user.name,
+    loss_review: { id: 'pending-loss-3', status: 'pending', reason: 'Deal pending', requested_by: String(user._id), requested_name: user.name, requested_at: new Date().toISOString() },
+  });
+  const deal = { _id: new ObjectId(), dealership: site, lead_id: String(third._id), status: 'registered', owner_id: String(user._id), owner_name: user.name };
+  records.deals.push(deal);
+  const completeDeal = await request(`/deals/${deal._id}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'completed' }),
+  });
+  assert.equal(completeDeal.status, 200, completeDeal.body.error);
+  assert.equal(third.status, 'sold');
+  assert.equal(third.loss_review.status, 'cancelled');
+
+  // 4. Bulk status sold auto-clears pending loss_review
+  third.status = 'following_up';
+  third.loss_review = { id: 'pending-loss-4', status: 'pending', reason: 'Old loss' };
+  const bulk = await request('/leads/bulk-status', {
+    method: 'POST',
+    body: JSON.stringify({ leadIds: [String(third._id)], status: 'sold', soldAt: '2026-11-24' }),
+  });
+  assert.equal(bulk.status, 200, bulk.body.error);
+  assert.equal(third.status, 'sold');
+  assert.equal(third.loss_review.status, 'cancelled');
+});

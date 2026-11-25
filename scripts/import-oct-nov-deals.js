@@ -6,6 +6,7 @@ const { phoneKey } = require('../lib/phone');
 const { saleDateIso } = require('../lib/records');
 const { businessId } = require('../lib/prospects');
 const { withLeadState } = require('../lib/lead-state');
+const { soldLeadCleanupFields, completeSoldLeadWork } = require('../lib/followup-policy');
 
 const SITE = 'South Morang Hyundai';
 const CSV_PATH = path.join(__dirname, 'data', 'oct_nov_2026_deals.csv');
@@ -244,6 +245,7 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
       const leadUnassigned = !targetLead.owner_id && (!targetLead.owner_name || String(targetLead.owner_name).trim().toLowerCase() === 'unassigned');
       const needsOwnerIdBackfill = !targetLead.owner_id && staff.ownerId && targetLead.owner_name && targetLead.owner_name.toLowerCase() === staff.ownerName.toLowerCase();
 
+      const hadPendingLoss = targetLead.loss_review?.status === 'pending';
       const setFields = {
         status: 'sold',
         sold_at: latest.soldAt,
@@ -251,6 +253,7 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
         deal_number: latest.dealNumber,
         updatedAt: now,
         last_activity_at: targetLead.last_activity_at || latest.soldAt,
+        ...soldLeadCleanupFields(targetLead, { id: 'oct_nov_2026_deals_script', name: 'Sales Floor Import' }, now, `Cleared automatically — deal ${latest.dealNumber} imported as Sold`),
       };
       if (!targetLead.customer_phone && nextPrimaryPhone) setFields.customer_phone = nextPrimaryPhone;
       if (!currentEmail && nextPrimaryEmail) setFields.customer_email = nextPrimaryEmail;
@@ -283,8 +286,19 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
           {
             $set: setFields,
             $addToSet: { booran_edited_fields: { $each: ['sold_at', 'delivery_date', 'deal_number', 'status'] } },
+            ...(hadPendingLoss ? {
+              $push: {
+                diary_entries: {
+                  author: 'Sales Floor Import',
+                  kind: 'loss_review',
+                  date: nowIso,
+                  note: `Loss review cleared automatically — deal ${latest.dealNumber} imported as Sold.`,
+                },
+              },
+            } : {}),
           },
         );
+        await completeSoldLeadWork(db, targetLead, `Deal ${latest.dealNumber} imported as Sold`, now);
       }
     } else {
       const seed = `octnov2026:${SITE}:${latest.company || latest.phoneKey || latest.primaryEmail || latest.dealNumber}`;
