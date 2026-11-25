@@ -6,7 +6,8 @@ function input(){
  return {staff,leads:[
   {_id:'a1',customer_name:'A One',owner_id:'a',created_at:'2026-11-19T23:00:00Z',diary_entries:[{author_id:'a',date:at,note:'Customer update'}]},
   {_id:'a2',customer_name:'A Two',owner_id:'a',created_at:'2026-11-19T23:00:00Z',next_action:{author_id:'a',recorded_at:at,due_at:'2026-11-21T01:00:00Z',status:'open',title:'Call'}},
-  {_id:'b1',customer_name:'B One',owner_id:'b',created_at:'2026-11-01T01:00:00Z',assigned_at:at,assigned_by:'m'},
+  {_id:'b1',customer_name:'B One',owner_id:'b',created_at:'2026-11-19T23:00:00Z',assigned_at:at,assigned_by:'m'},
+  {_id:'oldAllocated',customer_name:'Old Allocated',owner_id:'b',created_at:'2026-11-01T01:00:00Z',assigned_at:at,assigned_by:'m'},
   {_id:'u1',customer_name:'Unassigned',created_at:'2026-11-19T23:00:00Z'},
   {_id:'old',owner_id:'a',created_at:'2026-10-01T00:00:00Z',diary_entries:[{author_id:'a',date:at,note:'Existing customer update'}]},
  ],media:[{_id:'v1',lead_id:'a1',user_id:'a',status:'ready',content_type:'video/mp4',created_at:at}],
@@ -73,10 +74,16 @@ test('future, failed or inbound messages and unapproved schedules do not satisfy
  const result=dailyTraffic(data,date,now);assert.equal(result.members[0].coverage.videosSent,0);assert.equal(result.members[0].coverage.nextActionsSet,0);
 });
 test('same-day reassignment moves coverage to the final owner without changing the historical workday',()=>{
- const data=input();data.leads=[{_id:'a1',customer_name:'Assigned',owner_id:'b',created_at:'2026-11-01T00:00:00Z',diary_entries:[
-  {kind:'assignment',assignee_id:'a',date:'2026-11-19T01:00:00Z'},
-  {kind:'assignment',assignee_id:'b',date:at},
- ]}];
+ const data=input();data.leads=[
+  {_id:'a1',customer_name:'Assigned',owner_id:'b',created_at:'2026-11-19T23:00:00Z',diary_entries:[
+   {kind:'assignment',assignee_id:'a',date:'2026-11-19T23:30:00Z'},
+   {kind:'assignment',assignee_id:'b',date:at},
+  ]},
+  {_id:'hist',customer_name:'Historical',owner_id:'b',created_at:'2026-11-19T00:30:00Z',diary_entries:[
+   {kind:'assignment',assignee_id:'a',date:'2026-11-19T01:00:00Z'},
+   {kind:'assignment',assignee_id:'b',date:at},
+  ]},
+ ];
  let result=dailyTraffic(data,date,now);assert.equal(result.members[0].newCustomers,0);assert.equal(result.members[1].newCustomers,1);assert.equal(result.members[1].coverage.videosSent,1);
  result=dailyTraffic({...data,messages:[],media:[]},'2026-11-19',now);assert.equal(result.members[0].newCustomers,1);assert.equal(result.members[1].newCustomers,0);
 });

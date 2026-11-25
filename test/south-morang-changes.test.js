@@ -595,3 +595,72 @@ test('sold/Deal DealerSocket transitions, unassignments, and placeholder names n
   const oversight = buildDailyOversight({ leads, tasks: [], deals: [], media: [], messages: [], staff }, now);
   assert.equal(oversight.dailyNew.leads.some(l => l._id === String(dealTransitionId) || l._id === String(unassignedId)), false);
 });
+
+test('existing older leads allocated or bounced in DealerSocket never appear in today new customer tracking', async () => {
+  const site = 'South Morang Hyundai';
+  const isaacId = new ObjectId();
+  const quocId = new ObjectId();
+  const staff = [
+    { _id: isaacId, name: 'Isaac Bugeja', role: 'sales_consultant', site, active: true },
+    { _id: quocId, name: 'Quoc Truong', role: 'sales_manager', site, active: true },
+  ];
+  const dsLeadId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-162428').digest('hex').slice(0, 24));
+  const yestLeadId = new ObjectId();
+  const origAssigned = new Date('2026-11-11T08:22:39.312Z');
+  const target = memoryDb({
+    users: staff,
+    leads: [
+      {
+        _id: dsLeadId,
+        deal_id: 'DEALERSOCKET-10876-162428',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Addyson Chum',
+        status: 'following_up',
+        owner_id: String(quocId),
+        owner_name: 'Quoc Truong',
+        owner_source: 'dealersocket',
+        assigned_at: origAssigned,
+        created_at: '2026-11-06T07:56:34.937Z',
+        createdAt: new Date('2026-11-06T07:56:34.937Z'),
+        diary_entries: [],
+      },
+      {
+        _id: yestLeadId,
+        deal_id: 'NEXGATE-yesterday-1',
+        dealership_name: site,
+        source: 'Nextgate',
+        customer_name: 'sms connect prospect',
+        status: 'new_lead',
+        owner_id: String(isaacId),
+        owner_name: 'Isaac Bugeja',
+        assigned_by: String(quocId),
+        assigned_at: new Date('2026-11-25T18:03:07.763Z'),
+        created_at: '2026-11-25T09:33:53.964Z',
+        createdAt: new Date('2026-11-25T09:33:53.964Z'),
+        diary_entries: [
+          { kind: 'assignment', author_id: String(quocId), assignee_id: String(isaacId), date: '2026-11-25T18:03:07.763Z', note: 'Assigned to Isaac Bugeja.' },
+        ],
+      },
+    ],
+  });
+  const nowIso = '2026-11-25T17:02:39.180Z';
+  const source = memoryDb({
+    south_morang_prospects: [
+      { id: '162428', contactId: '22855', site: '10876', franchise: site, name: 'Addyson Chum', status: 'Unqualified', assignee: 'Isaac Bugeja', active: true, capturedAt: nowIso },
+    ],
+  });
+  await syncSmsCampaign(target, source, new Date(nowIso));
+  const leads = target.collection('leads').rows;
+  const dsLead = leads.find(l => String(l._id) === String(dsLeadId));
+  assert.equal(dsLead.owner_name, 'Isaac Bugeja');
+  assert.equal(dsLead.assigned_at.toISOString(), origAssigned.toISOString(), 'DealerSocket sync preserves original assigned_at for older leads');
+
+  const checkNow = new Date('2026-11-25T19:00:00.000Z'); // 2026-11-26 06:00 AM AEDT
+  const traffic = dailyTraffic({ leads, tasks: [], deals: [], media: [], messages: [], appointments: [], staff }, '2026-11-26', checkNow);
+  assert.equal(traffic.summary.newCustomers, 0);
+  assert.equal(traffic._customers.length, 0);
+
+  const oversight = buildDailyOversight({ leads, tasks: [], deals: [], media: [], messages: [], staff }, checkNow);
+  assert.equal(oversight.dailyNew.total, 0);
+});
