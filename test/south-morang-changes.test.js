@@ -14,6 +14,7 @@ const {
 const { emailLead } = require('../lib/inbound-lead-email');
 const { leadQuery } = require('../lib/query');
 const { dailyTraffic } = require('../lib/daily-traffic');
+const { buildDailyOversight } = require('../lib/daily-oversight');
 const { salesEvents } = require('../lib/dp/sales');
 
 function memoryDb(seed = {}) {
@@ -463,4 +464,134 @@ test('DealerSocket sync retires active:false prospects, widens Nextgate name win
   assert.equal(leads.some(l => l.deal_id === 'DEALERSOCKET-10876-700003'), false);
   const nextgatePrimary = leads.find(l => String(l._id) === String(oldNextgateId));
   assert.ok(nextgatePrimary.source_refs.some(r => r.deal_id === 'DEALERSOCKET-10876-700003'));
+});
+
+test('sold/Deal DealerSocket transitions, unassignments, and placeholder names never appear as Allocated Today', async () => {
+  const site = 'South Morang Hyundai';
+  const khanId = new ObjectId();
+  const dealTransitionId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-800001').digest('hex').slice(0, 24));
+  const dealDupId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-800002').digest('hex').slice(0, 24));
+  const unassignedId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-800003').digest('hex').slice(0, 24));
+  const placeholderId = new ObjectId(createHash('sha256').update('DEALERSOCKET-10876-800004').digest('hex').slice(0, 24));
+  const soldDupPrimaryId = new ObjectId();
+  const soldPlaceholderId = new ObjectId();
+
+  const staff = [{ _id: khanId, name: 'Khan Cetin', role: 'sales_consultant', site, active: true }];
+  const oldAssigned = new Date('2026-11-20T01:00:00.000Z');
+  const target = memoryDb({
+    users: staff,
+    leads: [
+      {
+        _id: dealTransitionId,
+        deal_id: 'DEALERSOCKET-10876-800001',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Amy Sneddon',
+        status: 'following_up',
+        owner_id: null,
+        owner_name: 'Unassigned',
+        assigned_at: null,
+        created_at: '2026-11-20T01:00:00.000Z',
+        createdAt: new Date('2026-11-20T01:00:00.000Z'),
+        diary_entries: [],
+      },
+      {
+        _id: dealDupId,
+        deal_id: 'DEALERSOCKET-10876-800002',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Gaye Kimberley',
+        status: 'following_up',
+        owner_id: null,
+        owner_name: 'Unassigned',
+        assigned_at: null,
+        created_at: '2026-11-20T01:00:00.000Z',
+        diary_entries: [],
+      },
+      {
+        _id: soldDupPrimaryId,
+        dealership_name: site,
+        source: 'Manual',
+        customer_name: 'Gaye Kimberley',
+        status: 'sold',
+        sold_at: '2026-11-22T02:00:00.000Z',
+        created_at: '2026-11-18T02:00:00.000Z',
+        diary_entries: [],
+      },
+      {
+        _id: unassignedId,
+        deal_id: 'DEALERSOCKET-10876-800003',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'Active Cleared Owner',
+        status: 'following_up',
+        owner_id: String(khanId),
+        owner_name: 'Khan Cetin',
+        owner_source: 'dealersocket',
+        assigned_at: oldAssigned,
+        created_at: '2026-11-20T01:00:00.000Z',
+        diary_entries: [],
+      },
+      {
+        _id: soldPlaceholderId,
+        dealership_name: site,
+        source: 'Nextgate',
+        customer_name: 'SMS Connect Prospect',
+        status: 'sold',
+        sold_at: '2026-11-22T02:00:00.000Z',
+        created_at: '2026-11-20T02:00:00.000Z',
+        diary_entries: [],
+      },
+      {
+        _id: placeholderId,
+        deal_id: 'DEALERSOCKET-10876-800004',
+        dealership_name: site,
+        source: 'DealerSocket',
+        customer_name: 'SMS Connect Prospect',
+        status: 'following_up',
+        owner_id: String(khanId),
+        owner_name: 'Khan Cetin',
+        created_at: '2026-11-20T01:00:00.000Z',
+        diary_entries: [],
+      },
+    ],
+  });
+
+  const nowIso = '2026-11-25T05:00:00.000Z';
+  const source = memoryDb({
+    south_morang_prospects: [
+      { id: '800001', contactId: '98001', site: '10876', franchise: 'South Morang Hyundai', name: 'Amy Sneddon', status: '6 - Deal', assignee: 'Cetin', active: true, capturedAt: nowIso },
+      { id: '800002', contactId: '98002', site: '10876', franchise: 'South Morang Hyundai', name: 'Gaye Kimberley', status: 'Deal', assignee: 'Cetin', active: true, capturedAt: nowIso },
+      { id: '800003', contactId: '98003', site: '10876', franchise: 'South Morang Hyundai', name: 'Active Cleared Owner', status: 'Up/Contacted', assignee: '', active: true, capturedAt: nowIso },
+      { id: '800004', contactId: '98004', site: '10876', franchise: 'South Morang Hyundai', name: 'SMS Connect Prospect', status: 'Up/Contacted', assignee: 'Cetin', active: true, capturedAt: nowIso, dealerSocketSnapshot: { record: { lead_source: 'Walk In' } } },
+    ],
+  });
+
+  const res = await syncSmsCampaign(target, source, new Date(nowIso));
+  assert.equal(res.opportunities.status, 'fulfilled');
+
+  const leads = target.collection('leads').rows;
+  const amy = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-800001');
+  assert.equal(amy.status, 'sold');
+  assert.equal(amy.sms_campaign.active, false);
+  assert.equal(amy.assigned_at, null);
+
+  const gaye = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-800002');
+  assert.equal(gaye.merged_into, String(soldDupPrimaryId));
+  assert.equal(gaye.status, 'lost');
+
+  const unassigned = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-800003');
+  assert.equal(unassigned.owner_id, null);
+  assert.equal(unassigned.owner_name, 'Unassigned');
+  assert.equal(unassigned.assigned_at, null);
+
+  const placeholder = leads.find(l => l.deal_id === 'DEALERSOCKET-10876-800004');
+  assert.equal(placeholder.merged_into, undefined);
+
+  const now = new Date(nowIso);
+  const traffic = dailyTraffic({ leads, tasks: [], deals: [], media: [], messages: [], appointments: [], staff }, '2026-11-25', now);
+  assert.equal(traffic._customers.some(c => c.id === String(dealTransitionId) || c.id === String(unassignedId)), false);
+
+  const oversight = buildDailyOversight({ leads, tasks: [], deals: [], media: [], messages: [], staff }, now);
+  assert.equal(oversight.dailyNew.leads.some(l => l._id === String(dealTransitionId) || l._id === String(unassignedId)), false);
 });
