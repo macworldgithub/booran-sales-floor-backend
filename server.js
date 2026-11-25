@@ -128,6 +128,11 @@ app.use((req, res, next) => {
 
 const getFlwupDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_FLWUP'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
 const getBooranDb = async (req) => { const db = await resolveDatabase('MONGODB_URI_BOORAN'); return req ? scopedDatabase(db, req.user, req.query.rooftop) : db; };
+const getWarrantyDb = async () => {
+  if (process.env.MONGODB_URI_WARRANTY) return resolveDatabase('MONGODB_URI_WARRANTY');
+  const flwup = await resolveDatabase('MONGODB_URI_FLWUP');
+  return flwup.client ? flwup.client.db('booran_warranty') : flwup;
+};
 const stockDeals = async (req, key) => {
   if (req.user.role === 'contractor') return [];
   // Stock availability is dealership-wide, even when the associated customer
@@ -190,7 +195,7 @@ installConnex(router, getFlwupDb, app.locals.connex);
 installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
-require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb);
+require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb, getWarrantyDb);
 installCrmReport(router, getFlwupDb);
 installLeadProcess(router, getFlwupDb, sms);
 installLostLeadSms(router, getFlwupDb, sms);

@@ -92,3 +92,63 @@ test('optional DMS feed follows bounded cursors without forwarding tokens on red
   assert.equal(result.processed,2);assert.equal(pages[1].url.searchParams.get('cursor'),'page-two');assert.equal(pages[0].options.redirect,'error');assert.equal(writes.length,1);
   await assert.rejects(pullSales(db,['Site A'],'manager',{DP_DMS_FEED_URL:'http://bad.test',DP_DMS_FEED_TOKEN:'secret'}),error=>error.status===503);
 });
+
+test('warranty cases and flags compute submitted counts, active flags and reason breakdowns', () => {
+  const { computeWarrantyStats } = require('../lib/dp/service');
+  const warrantyCases = [
+    {
+      _id: 'c1',
+      siteId: 'site_south_morang_kia',
+      siteName: 'South Morang Kia',
+      status: 'Submitted',
+      flagHistory: []
+    },
+    {
+      _id: 'c2',
+      siteId: 'site_south_morang_kia',
+      siteName: 'South Morang Kia',
+      status: 'Flagged',
+      flagHistory: [
+        { reasonCode: 'POOR_LIGHTING_BLUR', instruction: 'Blur', flaggedBy: 'Abdul', flaggedAt: '2026-11-20T00:00:00Z' }
+      ]
+    },
+    {
+      _id: 'c3',
+      siteId: 'site_south_morang_hyundai',
+      siteName: 'South Morang Hyundai',
+      status: 'Awaiting Review',
+      flagHistory: [
+        { reasonCode: 'UNREADABLE_VIN', instruction: 'Fixed', flaggedBy: 'Abdul', flaggedAt: '2026-11-20T00:00:00Z', resolvedAt: '2026-11-21T00:00:00Z' }
+      ]
+    },
+    {
+      _id: 'c4',
+      siteId: 'site_south_morang_byd',
+      siteName: 'South Morang BYD',
+      status: 'Uploading',
+      flagHistory: []
+    }
+  ];
+
+  const stats = computeWarrantyStats(warrantyCases);
+  assert.equal(stats.total, 4);
+  assert.equal(stats.submitted, 1);
+  assert.equal(stats.flagged, 1);
+  assert.equal(stats.awaitingReview, 1);
+  assert.equal(stats.uploading, 1);
+  assert.equal(stats.activeFlags, 1);
+  assert.equal(stats.totalFlags, 2);
+  assert.equal(stats.flagReasons.POOR_LIGHTING_BLUR, 1);
+
+  const metrics = serviceMetrics([], [], defaultSettings().serviceTargets, range, warrantyCases);
+  assert.equal(metrics.warrantySubmitted, 1);
+  assert.equal(metrics.warrantyFlagged, 1);
+  assert.equal(metrics.warrantyActiveFlags, 1);
+  assert.equal(metrics.warrantyTotal, 4);
+  assert.equal(metrics.claimsOpened, 1);
+  assert.equal(metrics.claimsClosed, 1);
+  const warrantyDept = metrics.departments.find(d => d.department === 'Warranty');
+  assert.ok(warrantyDept);
+  assert.equal(warrantyDept.claimsOpened, 1);
+  assert.equal(warrantyDept.health, 'red');
+});
