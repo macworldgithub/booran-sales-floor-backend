@@ -336,9 +336,10 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
       stats.unmatchedExamples.push({ deal: latest.dealNumber, name: latest.customerName, company: bizName, assign: staff.ownerName });
 
       if (apply) {
+        const { _id: _omit, ...leadInsert } = newLead;
         await db.collection('leads').findOneAndUpdate(
           { _id: newLeadId },
-          { $setOnInsert: newLead },
+          { $setOnInsert: leadInsert },
           { upsert: true },
         );
       }
@@ -353,7 +354,7 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
           { _id: bizId, dealership: siteRx },
           {
             $set: { name: bizName, dealership: SITE, updatedAt: nowIso },
-            $setOnInsert: { _id: bizId, abn: '', industry: '', createdAt: nowIso, createdBy: 'oct_nov_2026_deals_script' },
+            $setOnInsert: { abn: '', industry: '', createdAt: nowIso, createdBy: 'oct_nov_2026_deals_script' },
           },
           { upsert: true },
         );
@@ -362,7 +363,7 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
           { _id: lKey },
           {
             $set: { dealership: SITE, lead_id: String(targetLead._id), business_id: bizId, updatedAt: nowIso },
-            $setOnInsert: { _id: lKey, role: 'Contact', is_primary: true, createdAt: nowIso, createdBy: 'oct_nov_2026_deals_script' },
+            $setOnInsert: { role: 'Contact', is_primary: true, createdAt: nowIso, createdBy: 'oct_nov_2026_deals_script' },
           },
           { upsert: true },
         );
@@ -396,7 +397,6 @@ async function runImport(db, { apply = false, csvText = fs.readFileSync(CSV_PATH
               updatedAt: nowIso,
             },
             $setOnInsert: {
-              _id: dealId,
               createdAt: row.soldAt || nowIso,
               created_by: 'oct_nov_2026_deals_script',
             },
