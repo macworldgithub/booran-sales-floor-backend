@@ -12,7 +12,7 @@ const { installPublicMedia, installCustomerMessages } = require('./lib/customer-
 const mobileMessage = require('./lib/mobilemessage');
 const { createMediaStorage } = require('./lib/mongo-media-storage');
 const { nexgateService, installNexgate, HOUR } = require('./lib/nexgate-sync');
-const { syncSmsCampaign, resolveSmsCampaignDatabase, INTERVAL: SMS_CAMPAIGN_INTERVAL } = require('./lib/sms-campaign-sync');
+const { syncSmsCampaign, resolveSmsCampaignDatabase, INTERVAL: SMS_CAMPAIGN_INTERVAL, installLeadSourceSettings } = require('./lib/sms-campaign-sync');
 const { installAllocation } = require('./lib/lead-allocation');
 const { isManager, canViewCost, canAccessSite, allocationOnly } = require('./lib/roles');
 const { createUniqueLead, duplicateError, updateUniqueMobile, canonicalLead } = require('./lib/lead-identity');
@@ -21,6 +21,7 @@ const { installInboundEmailWebhook, pollLeadEmail, mailboxes } = require('./lib/
 const { processVideoJobs } = require('./lib/video-jobs');
 const { installExternalWebhook, installExternalLeads } = require('./lib/external-leads');
 const { installLeadProcess } = require('./lib/lead-process');
+const { installLostLeadSms } = require('./lib/lost-lead-sms');
 const { installDailyOversight } = require('./lib/daily-oversight');
 const { installDailyTraffic } = require('./lib/daily-traffic');
 const { installPulse, calendarDay } = require('./lib/pulse');
@@ -191,7 +192,9 @@ installProspects(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb);
 installCrmReport(router, getFlwupDb);
-installLeadProcess(router, getFlwupDb);
+installLeadProcess(router, getFlwupDb, sms);
+installLostLeadSms(router, getFlwupDb, sms);
+installLeadSourceSettings(router, getFlwupDb);
 require('./lib/crm-updates').installCrmUpdates(router, getFlwupDb);
 require('./lib/video-library').installVideoLibrary(router, getFlwupDb);
 installDailyOversight(router, getFlwupDb);
@@ -339,10 +342,24 @@ router.patch('/leads/:id', async (req, res) => {
     updateDoc.$push = { ...updateDoc.$push, activity_events: { date: updateDoc.$set.last_activity_at,
       author_id: req.user.id, author: req.user.name, kind: 'customer_update' } };
     if (req.body.status && req.body.status !== existingLead.status) {
-      if (req.body.status === 'sold') updateDoc.$set.sold_at = updateDoc.$set.last_activity_at;
+      if (req.body.status === 'sold') updateDoc.$set.sold_at = updateDoc.$set.sold_at || updateDoc.$set.last_activity_at;
       query = { ...query, status: existingLead.status, 'loss_review.status': { $ne: 'pending' } };
       updateDoc.$inc = { process_revision: 1 };
-      updateDoc.$push.stage_history={from:existingLead.status,to:req.body.status,at:updateDoc.$set.last_activity_at,by:req.user.id};
+      updateDoc.$push.stage_history = { from: existingLead.status, to: req.body.status, at: req.body.status === 'sold' ? updateDoc.$set.sold_at : updateDoc.$set.last_activity_at, by: req.user.id };
+    } else if (Object.hasOwn(updateDoc.$set, 'sold_at') || Object.hasOwn(updateDoc.$set, 'delivery_date') || Object.hasOwn(updateDoc.$set, 'deal_number')) {
+      if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Only managers can update sale or delivery dates.' });
+      if (existingLead.status !== 'sold') invalid('Sale and delivery dates can only be updated on sold leads.');
+      if (Object.hasOwn(updateDoc.$set, 'sold_at') && updateDoc.$set.sold_at && Array.isArray(existingLead.stage_history)) {
+        updateDoc.$set.stage_history = existingLead.stage_history.map(event => event.to === 'sold' ? { ...event, at: updateDoc.$set.sold_at } : event);
+      }
+      const parts = [
+        Object.hasOwn(updateDoc.$set, 'sold_at') ? `Sold date updated to ${String(updateDoc.$set.sold_at).slice(0, 10)}` : '',
+        Object.hasOwn(updateDoc.$set, 'delivery_date') ? `Delivery date updated to ${String(updateDoc.$set.delivery_date || 'cleared').slice(0, 10)}` : '',
+        Object.hasOwn(updateDoc.$set, 'deal_number') && updateDoc.$set.deal_number ? `Deal # ${updateDoc.$set.deal_number}` : '',
+      ].filter(Boolean);
+      if (parts.length && !('newNote' in req.body)) {
+        updateDoc.$push.diary_entries = { kind: 'note', author_role: req.user.role, author: req.user.name, author_id: req.user.id, date: updateDoc.$set.last_activity_at, note: parts.join(' · ') };
+      }
     }
     if (Object.hasOwn(updateDoc.$set, 'business_name')) {
       const lead = await db.collection('leads').findOne(query);

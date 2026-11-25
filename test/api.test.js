@@ -2892,3 +2892,73 @@ test('daily traffic invalidates cached allocation state after an authorized assi
  assert.equal(assigned.status,200,assigned.body.error);
  const data=(await request('/daily-traffic')).body.data;assert.equal(data.priorities.unassigned,0);assert.equal(data.members.find(row=>row.id===String(user._id)).newCustomers,1);
 });
+
+test('managers can correct sold dates, configure lost SMS and source filters, approve loss directly, and bulk-close unassigned leads', async t => {
+  const { request, records, user } = await api(t);
+  const lead = records.leads[0];
+  const site = lead.dealership_name;
+  user.site = site;
+
+  // 1. Mark sold & correct sale/delivery date + deal number
+  const markSold = await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ status: 'sold' }) });
+  assert.equal(markSold.status, 200, markSold.body.error);
+  const corrected = await request(`/leads/${lead._id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ sold_at: '2026-11-14', delivery_date: '2026-11-21', deal_number: 'SM29263' }),
+  });
+  assert.equal(corrected.status, 200, corrected.body.error);
+  assert.equal(corrected.body.data.sold_at, '2026-11-14T02:00:00.000Z');
+  assert.equal(corrected.body.data.delivery_date, '2026-11-21T02:00:00.000Z');
+  assert.equal(corrected.body.data.deal_number, 'SM29263');
+  assert.equal(lead.stage_history.find(e => e.to === 'sold').at, '2026-11-14T02:00:00.000Z');
+
+  // Consultants cannot backdate sale dates even on their own lead
+  lead.owner_id = String(user._id);
+  user.role = 'sales_consultant';
+  assert.equal((await request(`/leads/${lead._id}`, { method: 'PATCH', body: JSON.stringify({ sold_at: '2026-11-10' }) })).status, 403);
+  user.role = 'manager';
+
+  // 2. Settings endpoints for Lost Final SMS & Lead Source Filters
+  const putLostSms = await request('/crm/lost-sms-settings', {
+    method: 'PUT',
+    body: JSON.stringify({ dealership: site, enabled: true, template: 'Thanks {first_name} from {dealership}.' }),
+  });
+  assert.equal(putLostSms.status, 200, putLostSms.body.error);
+  const getLostSms = await request(`/crm/lost-sms-settings?rooftop=${encodeURIComponent(site)}`);
+  assert.equal(getLostSms.status, 200);
+  assert.equal(getLostSms.body.data.template, 'Thanks {first_name} from {dealership}.');
+
+  const putSourceFilters = await request('/crm/lead-source-settings', {
+    method: 'PUT',
+    body: JSON.stringify({ dealership: site, skipDealerSocketNextgateLeads: true, skipDealerSocketWebsiteLeads: true }),
+  });
+  assert.equal(putSourceFilters.status, 200, putSourceFilters.body.error);
+  const getSourceFilters = await request(`/crm/lead-source-settings?rooftop=${encodeURIComponent(site)}`);
+  assert.equal(getSourceFilters.status, 200);
+  assert.equal(getSourceFilters.body.data.skipDealerSocketWebsiteLeads, true);
+
+  // 3. Direct manager loss approval (approveNow)
+  const second = records.leads[1];
+  second.dealership_name = site;
+  second.status = 'following_up';
+  const approveNow = await request(`/leads/${second._id}/loss-request`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Purchased elsewhere', approveNow: true, sendFinalSms: false }),
+  });
+  assert.equal(approveNow.status, 200, approveNow.body.error);
+  assert.equal(approveNow.body.data.status, 'lost');
+  assert.equal(approveNow.body.finalSms.reason, 'disabled_by_manager');
+
+  // 4. Bulk unassigned cleanup endpoint
+  const third = records.leads[2];
+  third.dealership_name = site;
+  third.status = 'new_lead';
+  const bulk = await request('/leads/bulk-status', {
+    method: 'POST',
+    body: JSON.stringify({ leadIds: [String(third._id)], status: 'sold', soldAt: '2026-10-30', reason: 'Historical cleanup' }),
+  });
+  assert.equal(bulk.status, 200, bulk.body.error);
+  assert.equal(bulk.body.data.updated.length, 1);
+  assert.equal(third.status, 'sold');
+  assert.equal(third.sold_at, '2026-10-30T02:00:00.000Z');
+});
