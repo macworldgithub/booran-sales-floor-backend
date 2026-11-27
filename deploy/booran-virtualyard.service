@@ -13,7 +13,7 @@ Environment=VIRTUALYARD_DATA_DIR=/var/www/booran/shared/virtualyard
 UMask=0077
 Nice=10
 TimeoutStartSec=55min
-ExecStart=/usr/bin/node scripts/sync-virtualyard.js
+ExecStart=/opt/booran-node22/bin/node scripts/sync-virtualyard.js
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

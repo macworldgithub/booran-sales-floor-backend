@@ -46,6 +46,8 @@ The job loads the existing backend `.env` for the Booran database connection.
 Install the two `deploy/booran-virtualyard.*` unit files into `/etc/systemd/system`.
 Create the shared directory before starting the service. The timer is daily at
 20:30 UTC (01:30 Pakistan, 07:30 Melbourne during daylight saving).
+The service uses Booran's existing Node 22 installation at
+`/opt/booran-node22/bin/node`, independently of the server's default Node version.
 
 ```sh
 systemctl daemon-reload
