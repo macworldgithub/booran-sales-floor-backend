@@ -1446,6 +1446,41 @@ function matches(record, query) {
 }
 // In-memory storage exercises the real Express/auth/scoping/query/validation layers.
 // It deliberately implements only the Mongo operations used by these HTTP scenarios.
+test('Virtual Yard repeat imports preserve CRM edits and queue conflicting identities', async () => {
+  const { importSnapshot, SITE } = require('../lib/virtualyard');
+  const records = {}, db = fixtureDb(records);
+  const lead = { id: '123', type: 'lead', site: SITE, stage: 0, customer: { name: 'Virtual Buyer', phone: '0412345678', email: 'vy@example.test' },
+    vehicle: { description: 'BYD Seal', stock: 'V123' }, status: 'New', notes: 'Source enquiry' };
+  const snapshot = { version: 1, dealership: SITE, scrapedAt: '2026-11-27T00:00:00Z', leads: [lead], testDrives: [] };
+  assert.equal((await importSnapshot(db, snapshot)).inserted, 1);
+  const stored = records.leads[0];
+  Object.assign(stored, { notes: 'Staff note', owner_id: 'staff-1', status: 'sold', customer_phone: '+61400000000', booran_opted_out: true });
+  lead.notes = 'Provider changed note'; lead.status = 'Lost';
+  assert.equal((await importSnapshot(db, snapshot)).inserted, 0);
+  assert.equal(records.leads.length, 1);
+  assert.equal(stored.notes, 'Staff note'); assert.equal(stored.owner_id, 'staff-1');
+  assert.equal(stored.status, 'sold'); assert.equal(stored.customer_phone, '+61400000000'); assert.equal(stored.booran_opted_out, true);
+  assert.equal(stored.external.virtualyard.notes, 'Provider changed note');
+  snapshot.leads = [{ ...lead, id: '124', customer: { name: 'Different Person', phone: '+61400000000', email: 'different@example.test' } }];
+  await importSnapshot(db, snapshot);
+  assert.equal(records.leads.length, 1);
+  assert.equal(records.lead_merge_requests.length, 1);
+});
+
+test('Virtual Yard manager status is dealership scoped and never returns session material', async t => {
+  const { request, records, user } = await api(t); user.site = 'BYD South Morang';
+  records.integration_sync = [
+    { _id: 'vy', kind: 'virtualyard', dealership: user.site, status: 'provider_blocked', error: 'Provider access required', cookie: 'private-session', sourceRecords: 12 },
+    { _id: 'other', kind: 'virtualyard', dealership: 'South Morang Hyundai', sourceRecords: 500 },
+  ];
+  const result = await request('/integrations/lead-status?rooftop=BYD%20South%20Morang');
+  assert.equal(result.status, 200);
+  assert.equal(result.body.data.states.length, 1);
+  assert.equal(result.body.data.states[0].status, 'provider_blocked');
+  assert.equal(result.body.data.states[0].sourceRecords, 12);
+  assert.ok(!JSON.stringify(result.body).includes('private-session'));
+});
+
 function fixtureDb(records) {
   return { client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) }, collection(name) {
     const rows = records[name] ||= [];

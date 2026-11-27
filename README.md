@@ -1,5 +1,7 @@
 # Booran Sales Floor API
 
+The [South Morang BYD Virtual Yard guide](docs/virtualyard.md) covers the scoped scraper, private session setup, imports, daily schedule and provider-block pause.
+
 The [Dealer Principal dashboard guide](docs/dealer-principal.md) covers reporting, service entries, permissions, optional DMS ingestion, formulas, stock history and administrator handover.
 
 ## Booran Appraisals and legacy archive

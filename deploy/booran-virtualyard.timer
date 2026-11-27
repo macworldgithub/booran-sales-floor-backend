@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Booran South Morang BYD Virtual Yard sync
+
+[Timer]
+OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=booran-virtualyard.service
+
+[Install]
+WantedBy=timers.target

@@ -231,8 +231,8 @@ router.get('/messaging/status', require('./lib/workflow-route').route(async (req
 router.get('/integrations/lead-status', require('./lib/workflow-route').route(async (req, res) => {
   if (!isManager(req.user)) return res.status(403).json({ success: false, error: 'Integration status requires a manager account.' });
   const db = await getFlwupDb(req);
-  const fields = ['kind', 'dealership', 'address', 'sourceRecords', 'sourceActive', 'sourceMissingOwner', 'customers', 'missingPhone', 'missingEmail', 'last_success', 'snapshotAt', 'error'];
-  const states = (await db.collection('integration_sync').find({ kind: { $in: ['dealersocket', 'inbound_email'] } },
+  const fields = ['kind', 'dealership', 'address', 'sourceRecords', 'sourceActive', 'sourceMissingOwner', 'customers', 'missingPhone', 'missingEmail', 'last_success', 'snapshotAt', 'status', 'testDrives', 'error'];
+  const states = (await db.collection('integration_sync').find({ kind: { $in: ['dealersocket', 'inbound_email', 'virtualyard'] } },
     { projection: Object.fromEntries(fields.map(field => [field, 1])) }).toArray())
     .map(row => Object.fromEntries(fields.filter(field => row[field] !== undefined).map(field => [field, row[field]])));
   const email = canAccessSite(req.user, 'South Morang Hyundai') ? await Promise.all(mailboxes().map(async inbox => {
