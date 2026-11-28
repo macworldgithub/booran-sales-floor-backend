@@ -1481,6 +1481,34 @@ test('Virtual Yard manager status is dealership scoped and never returns session
   assert.ok(!JSON.stringify(result.body).includes('private-session'));
 });
 
+test('Virtual Yard CSV details preserve source columns and enforce record access', async t => {
+  const { SITE, KIND, archiveKey } = require('../lib/virtualyard-source');
+  const { request, records, user } = await api(t);
+  user.site = SITE;
+  const lead = records.leads[0];
+  lead.dealership_name = SITE;
+  lead.source_refs = [{ external: { virtualyard: { lead_id: '12345' } } }];
+  const booking = { _id: new ObjectId(), dealership: SITE, type: 'Test Drive', virtualyard: { id: '54321' } };
+  records.appointments = [booking];
+  const exports = [{ file: 'fixture.csv', row: 2 }];
+  const fields = { Prospect: 'Example Buyer', Vehicle: 'BYD Seal $59,990', Forms: '', Tags: 'Web', Status: 'NEW' };
+  const drive = { Id: '54321', Details: 'Example Buyer\nBYD Seal', Lead: 'Linked enquiry', Tags: '', Status: 'Confirmed' };
+  records.integration_sync = [
+    { _id: archiveKey('lead', '12345'), kind: KIND, dealership: SITE, records: { 12345: { fields, exports }, 12377: { fields: { Prospect: 'different customer' }, exports } } },
+    { _id: archiveKey('test_drive', '54321'), kind: KIND, dealership: SITE, records: { 54321: { fields: drive, exports } } },
+  ];
+  const leadPath = `/leads/${lead._id}/virtualyard-source`;
+  const drivePath = `/appointments/${booking._id}/virtualyard-source`;
+  const savedLead = await request(leadPath);
+  assert.equal(savedLead.status, 200);
+  assert.deepEqual(savedLead.body.data, [{ id: '12345', fields, exports }]);
+  assert.deepEqual((await request(drivePath)).body.data, [{ id: '54321', fields: drive, exports }]);
+  assert.equal((await request(`${leadPath}?rooftop=South%20Morang%20Kia`)).status, 404);
+  user.site = 'South Morang Kia';
+  assert.equal((await request(leadPath)).status, 404);
+  assert.equal((await request(drivePath)).status, 404);
+});
+
 function fixtureDb(records) {
   return { client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) }, collection(name) {
     const rows = records[name] ||= [];

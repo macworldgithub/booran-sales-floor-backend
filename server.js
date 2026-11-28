@@ -196,6 +196,7 @@ installConnex(router, getFlwupDb, app.locals.connex);
 installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installCustomerProfile(router, getFlwupDb, getBooranDb);
+require('./lib/virtualyard-source').installVirtualyardSource(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb, getWarrantyDb);
 installCrmReport(router, getFlwupDb);
