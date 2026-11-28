@@ -43,7 +43,7 @@ test('Virtual Yard CSV import with real MongoDB transactions and co-located arch
   const port = await freePort();
   const process = spawn(mongod, ['--dbpath', directory, '--port', String(port), '--bind_ip', address, '--replSet', 'csv-tests',
     '--logpath', join(directory, 'mongod.log')], { stdio: 'ignore', windowsHide: true });
-  const client = new MongoClient(`mongodb://${address}:${port}/virtualyard_test?directConnection=true`, { serverSelectionTimeoutMS: 500 });
+  const client = new MongoClient(`mongodb://${address}:${port}/virtualyard_test?directConnection=true`, { serverSelectionTimeoutMS: 5000 });
   t.after(async () => {
     await client.close();
     if (process.exitCode === null && !process.signalCode && process.pid) {

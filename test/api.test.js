@@ -1512,6 +1512,19 @@ test('Virtual Yard CSV details preserve source columns and enforce record access
 const csvCell = value => '"' + value.replaceAll('"', '""') + '"';
 const uploadPath = '/integrations/virtualyard/csv';
 
+test('Virtual Yard CSV preview accepts exactly 4 MB and rejects a larger request', async t => {
+  const { request } = await api(t);
+  const csv = Buffer.from('Id,Details,Lead,Tags,Status\n' +
+    '489667,Test Buyer Type Test Drive Location BYD South Morang BYD Seal,,,Confirmed 2026/11/28 09:00 AM\n');
+  const limit = 4 * 1024 * 1024;
+  const preview = body => request(`${uploadPath}?file=test-drives.csv`, { method: 'POST', headers: { 'content-type': 'text/csv' }, body });
+  const full = Buffer.concat([csv, Buffer.alloc(limit - csv.length, 10)]);
+  const atLimit = await preview(full);
+  assert.equal(atLimit.status, 200, atLimit.body.error);
+  assert.equal(atLimit.body.data.ready, 1);
+  assert.equal((await preview(Buffer.concat([full, Buffer.from('\n')]))).status, 413);
+});
+
 test('Virtual Yard CSV upload inserts and updates by source ID, preserves staff edits and rejects repeat writes', async t => {
   const { request, records, user } = await api(t);
   const { documentId } = require('../lib/virtualyard-csv-import');
