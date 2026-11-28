@@ -40,6 +40,7 @@ const { ConnexService } = require('./lib/connex-service');
 const { installConnex } = require('./lib/connex-routes');
 const { installConnexNotifications, processConnexNotifications } = require('./lib/connex-notifications');
 const { allocationOnlyName } = require('./lib/allocation-only');
+const { UPLOAD_PATH: virtualyardCsvPath, installVirtualyardCsvImport } = require('./lib/virtualyard-csv-import');
 
 
 require('dotenv').config();
@@ -112,6 +113,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => {
   if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
+    if (req.method === 'POST' && req.is('text/csv') && [virtualyardCsvPath, `/api${virtualyardCsvPath}`].includes(req.path)) return next();
     if (req.method === 'PUT' && /^\/(api\/)?leads\/[^/]+\/media\/[^/]+\/content$/.test(req.path)) return next();
     if (req.method === 'PUT' && /^\/(api\/)?public\/trade-ins\/[^/]+\/photos\/[^/]+\/content$/.test(req.path)) return next();
     if (req.method === 'PUT' && /^\/(api\/)?deliveries\/[^/]+\/accessories\/[^/]+\/proof$/.test(req.path)) return next();
@@ -197,6 +199,7 @@ installConnexNotifications(router, getFlwupDb, { sms });
 installProspects(router, getFlwupDb);
 installCustomerProfile(router, getFlwupDb, getBooranDb);
 require('./lib/virtualyard-source').installVirtualyardSource(router, getFlwupDb);
+installVirtualyardCsvImport(router, getFlwupDb);
 installPulse(router, getFlwupDb);
 require('./lib/dp/routes').installDpDashboard(router, getFlwupDb, getBooranDb, getWarrantyDb);
 installCrmReport(router, getFlwupDb);

@@ -1509,7 +1509,80 @@ test('Virtual Yard CSV details preserve source columns and enforce record access
   assert.equal((await request(drivePath)).status, 404);
 });
 
+const csvCell = value => '"' + value.replaceAll('"', '""') + '"';
+const uploadPath = '/integrations/virtualyard/csv';
+
+test('Virtual Yard CSV upload inserts and updates by source ID, preserves staff edits and rejects repeat writes', async t => {
+  const { request, records, user } = await api(t);
+  const { documentId } = require('../lib/virtualyard-csv-import');
+  const preview = (file, text) => request(`${uploadPath}?file=${encodeURIComponent(file)}`, {
+    method: 'POST', headers: { 'content-type': 'text/csv' }, body: text,
+  });
+  const apply = id => request(`${uploadPath}/${encodeURIComponent(id)}/apply`, { method: 'POST', body: '{}' });
+  const drive = (name, status, lead = 'Lead reference\nwith "quotes"') => [
+    '489667', `${name} Email buyer@example.test Phone 0412345678 Type Test Drive Location BYD South Morang 2026 BYD SEAL Stock# 123`,
+    lead, '', status,
+  ].map(csvCell).join(',');
+  const driveHeader = '\n\n\uFEFFId,Details,Lead,Tags,Status\r\n';
+  const first = drive('Test Buyer', 'Confirmed 2026/11/28 09:00 AM');
+  let saved = await preview('test-drives-2026-11-28-150000.csv', driveHeader + first + '\r\n' + first);
+  assert.equal(saved.status, 200, saved.body.error);
+  assert.equal(saved.body.data.ready, 1);
+  assert.equal(saved.body.data.duplicates, 1);
+  assert.equal(records.appointments?.length || 0, 0);
+  const firstJob = saved.body.data.id;
+  saved = await apply(firstJob);
+  assert.equal(saved.status, 200, saved.body.error);
+  assert.deepEqual(saved.body.data.result, { inserted: 1, updated: 0, unchanged: 0, skipped: 0 });
+  assert.deepEqual((await apply(firstJob)).body, saved.body);
+  const appointment = records.appointments[0];
+  assert.equal(appointment.when, '2026-11-27T22:00:00.000Z');
+  assert.equal(String(appointment._id), String(documentId('test_drive', '489667')));
+
+  saved = await preview('test-drives-2026-11-28-151000.csv', driveHeader + drive('Test Buyer', 'Finished 2026/11/28 10:00 AM'));
+  assert.equal(saved.body.data.existing, 1);
+  assert.deepEqual((await apply(saved.body.data.id)).body.data.result, { inserted: 0, updated: 1, unchanged: 0, skipped: 0 });
+  assert.equal(appointment.status, 'Completed');
+  assert.equal(appointment.when, '2026-11-27T23:00:00.000Z');
+  const source = await request(`/appointments/${appointment._id}/virtualyard-source`);
+  assert.equal(source.body.data[0].fields.Lead, 'Lead reference\nwith "quotes"');
+  assert.equal(source.body.data[0].fields.Status, 'Finished 2026/11/28 10:00 AM');
+
+  saved = await preview('test-drives-2026-11-28-150000.csv', driveHeader + first);
+  assert.equal((await apply(saved.body.data.id)).body.data.result.unchanged, 1, 'An older export cannot revert the latest booking');
+  assert.equal(records.appointments.length, 1);
+
+  const lead = (name, site, price, stage = 'New') => [
+    `${name} Enquiry Type: Test Drive Location: ${site}... 4462263 Source Your website Page Assigned To Not Assigned Date 2026-11-28 13:38:04 Stage ${stage} Last Contact 12 minutes`,
+    `2026 BYD ATTO 3 Yard: ${site} Stock# ABC Price ${price}`, 'Form A', 'Online', 'BOOKING',
+  ].map(csvCell).join(',');
+  const leadHeader = 'Prospect,Vehicle,Forms,Tags,Status\r\n';
+  saved = await preview('leads-2026-11-28-151000.csv', leadHeader + lead('Customer A', 'BYD South Morang', '$47,590'));
+  assert.equal((await apply(saved.body.data.id)).body.data.result.inserted, 1);
+  const existing = records.leads.find(item => item.source === 'Virtual Yard');
+  Object.assign(existing, { customer_name: 'Staff edited name', owner_name: 'Assigned Manager', booran_edited_fields: ['customer_name'] });
+  saved = await preview('leads-2026-11-28-152000.csv', leadHeader + lead('Corrected Name', 'BYD South Morang', '$46,000', 'Complete'));
+  assert.equal((await apply(saved.body.data.id)).body.data.result.updated, 1);
+  assert.equal(existing.customer_name, 'Staff edited name');
+  assert.equal(existing.owner_name, 'Assigned Manager');
+  assert.equal(existing.status, 'completed');
+  assert.equal(existing.external.virtualyard.price, '$46,000');
+  assert.equal(records.leads.filter(item => item.source === 'Virtual Yard').length, 1);
+  saved = await preview('leads-2026-11-28-153000.csv', leadHeader + lead('Wrong Site', 'BYD Waverley', '$46,000'));
+  assert.equal(saved.body.data.ready, 0);
+  assert.equal(saved.body.data.issues, 1);
+  user.site = 'South Morang Kia';
+  assert.equal((await preview('test-drives.csv', driveHeader + first)).status, 403);
+  assert.equal((await apply(firstJob)).status, 403);
+});
+
 function fixtureDb(records) {
+  const set = (document, key, value) => {
+    const path = key.split('.');
+    let node = document;
+    for (const piece of path.slice(0, -1)) node = node[piece] ||= {};
+    node[path.at(-1)] = value;
+  };
   return { client: { withSession: async fn => fn({ withTransaction: async fn => fn() }) }, collection(name) {
     const rows = records[name] ||= [];
     return {
@@ -1533,6 +1606,14 @@ function fixtureDb(records) {
         return { insertedId: document._id };
       },
       async deleteOne(query) { const i = rows.findIndex((row) => matches(row, query)); if (i >= 0) rows.splice(i, 1); },
+      async deleteMany(query) { for (let i = rows.length - 1; i >= 0; i--) if (matches(rows[i], query)) rows.splice(i, 1); },
+      async updateOne(query, update) {
+        const row = rows.find(item => matches(item, query));
+        if (!row) return { matchedCount: 0 };
+        for (const [key, value] of Object.entries(update.$set || {})) set(row, key, value);
+        for (const key of Object.keys(update.$unset || {})) delete row[key];
+        return { matchedCount: 1 };
+      },
       async updateMany(query, update) {
         const matchesQuery = rows.filter(row => matches(row, query));
         for (const row of matchesQuery) {
@@ -1555,11 +1636,8 @@ function fixtureDb(records) {
             row = { _id: new ObjectId(), ...filter, ...update.$setOnInsert }; rows.push(row); upsertedCount++;
           }
           if (Array.isArray(update)) { Object.assign(row, aggregateRows([row], update, records)[0]); continue; }
-          for (const [key, value] of Object.entries(update.$set || {})) {
-            const [field, child] = key.split('.');
-            if (child) (row[field] ||= {})[child] = value;
-            else row[field] = value;
-          }
+          for (const [key, value] of Object.entries(update.$set || {})) set(row, key, value);
+          for (const [key, value] of Object.entries(update.$addToSet || {})) set(row, key, [...new Set([...(read(row, key) || []), ...(value.$each || [value])])]);
         }
         return { upsertedCount };
       },
