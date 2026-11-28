@@ -1571,6 +1571,10 @@ test('Virtual Yard CSV upload inserts and updates by source ID, preserves staff 
   saved = await preview('leads-2026-11-28-153000.csv', leadHeader + lead('Wrong Site', 'BYD Waverley', '$46,000'));
   assert.equal(saved.body.data.ready, 0);
   assert.equal(saved.body.data.issues, 1);
+  saved = await preview('leads-2026-11-28-153000.csv', leadHeader +
+    lead('Corrected Name', 'BYD South Morang', '$46,000') + '\r\n' + lead('Wrong Site', 'BYD Waverley', '$46,000'));
+  assert.equal(saved.body.data.ready, 0, 'A conflicting out-of-site version blocks the ID');
+  assert.equal(saved.body.data.issues, 2);
   user.site = 'South Morang Kia';
   assert.equal((await preview('test-drives.csv', driveHeader + first)).status, 403);
   assert.equal((await apply(firstJob)).status, 403);
